@@ -245,6 +245,24 @@ export TERMGUARD_LLM_LIVE=1
 Responses are cached by `(sentence, rule id, prompt hash, model)`, so re-running over an
 unchanged corpus makes no API calls.
 
+**Before trusting the judgment step, exercise the prompt for real:**
+
+```bash
+python scripts/check_live_judge.py          # two documents, ~7 calls
+python scripts/check_live_judge.py --all    # the whole corpus
+```
+
+Everything else in this repo runs from recorded fixtures by default, which is right for
+tests and for a demo with no key — but it means the *prompt* can be wrong and the whole
+suite still passes. The containment around the model is thoroughly tested; none of that
+says the model judges well, because until this script runs it has not been asked.
+
+It grades the one case the product's central claim rests on: R-002, `side effect`, which
+must become `adverse event` in a clinical evaluation and must be left alone in
+patient-facing plain language. Same term, opposite answers, decided only by context. It
+writes nothing — no documents, no rows — and exits non-zero if an answer contradicts the
+rulebook.
+
 ---
 
 ## Environment variables

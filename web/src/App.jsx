@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { NavLink, Navigate, Route, Routes } from "react-router-dom";
 import { api } from "./api";
+import { NAV } from "./nav";
 import DocumentsPage from "./DocumentsPage";
 import HelpPage from "./HelpPage";
 import MetricsPage from "./MetricsPage";
@@ -15,14 +16,26 @@ import WorkflowPage from "./WorkflowPage";
 export default function App() {
   const [run, setRun] = useState(null);
   const [health, setHealth] = useState(null);
+  const [counts, setCounts] = useState({ pending: 0, candidates: 0 });
 
   // Seed with the last run so no screen is empty on load.
   const reload = useCallback(async () => {
+    let latest = null;
     try {
-      setRun(await api.latestRun());
+      latest = await api.latestRun();
+      setRun(latest);
     } catch {
       setRun(null); // no runs yet is a normal state, not an error
     }
+    // Candidate rules are counted separately: they are waiting on a different person
+    // doing a different job, and folding them into one number would hide both.
+    let candidates = 0;
+    try {
+      candidates = (await api.candidates({ status: "proposed" })).total;
+    } catch {
+      candidates = 0;
+    }
+    setCounts({ pending: latest?.changes?.pending ?? 0, candidates });
   }, []);
 
   useEffect(() => {
@@ -39,24 +52,24 @@ export default function App() {
             {health ? `${health.storage} storage · ${health.database}` : "connecting…"}
           </small>
         </div>
+
         <div className="nav">
-          <NavLink to="/metrics">Metrics</NavLink>
-          <NavLink to="/rulebook">Rulebook</NavLink>
-          <NavLink to="/sources">Sources</NavLink>
-          <NavLink to="/run">Run</NavLink>
-          <NavLink to="/review">Review</NavLink>
-          <NavLink to="/verify">Verify</NavLink>
-          <NavLink to="/documents">Documents</NavLink>
-          <NavLink to="/teams">Teams</NavLink>
-          <NavLink to="/workflow">Workflow</NavLink>
+          {NAV.map((group, index) => (
+            <div className="nav-group" key={group.title || `top-${index}`}>
+              {group.title && (
+                <div className="nav-title" title={group.hint}>{group.title}</div>
+              )}
+              {group.items.map((item) => (
+                <NavLink to={item.to} key={item.to}>
+                  <span>{item.label}</span>
+                  {counts[item.badge] > 0 && (
+                    <span className="nav-badge">{counts[item.badge]}</span>
+                  )}
+                </NavLink>
+              ))}
+            </div>
+          ))}
         </div>
-        {run && (
-          <div className="sub" style={{ padding: "18px 20px 0", fontSize: 11 }}>
-            Run {run.run_id}
-            <br />
-            {run.changes?.pending ?? 0} pending decisions
-          </div>
-        )}
       </nav>
 
       <main className="main">

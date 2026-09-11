@@ -658,3 +658,31 @@ def _mtime(path: Path) -> str | None:
     if not path.exists():
         return None
     return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
+
+
+# ------------------------------------------------------------ static frontend
+#
+# In development the dashboard is served by Vite on :5173 and proxies here. In a
+# container the built assets sit alongside the API and are served from the same origin,
+# so there is no CORS configuration and no separate service to deploy.
+
+
+def _mount_frontend() -> None:
+    dist = Path(__file__).resolve().parent.parent / "web" / "dist"
+    if not dist.is_dir():
+        return
+
+    from fastapi.staticfiles import StaticFiles
+
+    app.mount("/assets", StaticFiles(directory=dist / "assets"), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def spa(full_path: str) -> FileResponse:
+        """Serve the SPA shell for any unmatched path so client-side routes deep-link."""
+        candidate = dist / full_path
+        if full_path and candidate.is_file():
+            return FileResponse(candidate)
+        return FileResponse(dist / "index.html")
+
+
+_mount_frontend()

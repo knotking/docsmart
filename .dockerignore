@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+.pytest_cache/
+node_modules/
+web/dist/
+data/corpus/
+data/out/
+data/blobs/
+tests/
+*.db
+.git/

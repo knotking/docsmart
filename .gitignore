@@ -9,5 +9,7 @@ web/dist/
 data/blobs/
 data/out/
 termguard.db
+termguard.db-shm
+termguard.db-wal
 .docx-editor-workspaces/
 .env

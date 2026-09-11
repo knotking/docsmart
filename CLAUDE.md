@@ -64,6 +64,20 @@ what changed, who or what changed it, and who approved it".
     under a lease. Without it, two reviewers on one queue both decide change 412 and the
     append-only log faithfully records the second superseding the first with nobody the
     wiser. Leases expire so a closed laptop does not block the queue.
+13. **Teams are derived from the rulebook, never maintained beside it.** Every rule
+    already names an `owner`; a team's `slug` *is* that owner string, and work routes to
+    the team that owns the rule. An owner with no team is reported by
+    `teams.unrouted_owners`, never defaulted into a queue nobody watches. Team slugs are
+    globally unique because routing resolves a team by slug alone.
+14. **Work never changes hands silently.** Every movement of a change - route, reassign,
+    escalate, return, resolve - is a `Handoff` row carrying the actor and a required
+    reason. The change itself is never mutated, so "who had this and why did it move" is
+    answerable months later. `change_state` is *derived* from that history rather than
+    stored, so it cannot drift from the events that produced it.
+15. **Cover does not move assignments.** A delegation changes who the *effective* owner
+    is while it is in force and lapses on its own. Reassigning a hundred changes because
+    somebody took a week off, then reassigning them back, is how work gets lost. An agent
+    may never cover for a human: an absence must not quietly become machine authority.
 
 Identity remains **asserted, not proven** - authentication is still out of scope (see
 "what not to build"), and IAM in front of the service is the real boundary. What the
@@ -83,7 +97,7 @@ LLM step, React + Vite frontend, pytest. No other frameworks without asking.
 termguard/        config.py storage.py db.py models.py documents.py
                   rulebook.py walker.py scanner.py ooxml.py redline.py
                   judge.py pipeline.py
-                  review.py workflow.py policy.py verify.py
+                  review.py workflow.py teams.py policy.py verify.py
                   audit.py metrics.py api.py
 web/              React app
 data/rulebook.yaml   terminology rules

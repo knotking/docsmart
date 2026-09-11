@@ -193,14 +193,37 @@ def queue_item(session: Session, change: Change) -> dict[str, Any]:
 
 
 def _workflow_context(session: Session, change: Change) -> dict[str, Any]:
-    """Who this change is routed to, and whether anyone is on it right now."""
-    from termguard.workflow import active_claim, current_assignee
+    """Where this change sits: whose queue, whose hands, and what state it is in.
 
+    ``assigned_to`` is a named person; ``assigned_team`` is a pool anyone on that team may
+    claim. A change with neither is genuinely unrouted - which is different from one
+    sitting in a pool, and the queue should not render them the same way.
+    """
+    from termguard.models import Team
+    from termguard.workflow import (
+        active_claim,
+        change_state,
+        current_assignee,
+        current_assignment,
+        open_return,
+    )
+
+    assignment = current_assignment(session, change.id)  # type: ignore[arg-type]
     assignee = current_assignee(session, change.id)  # type: ignore[arg-type]
+    team = (
+        session.get(Team, assignment.team_id)
+        if assignment and assignment.team_id else None
+    )
     held = active_claim(session, change.id)  # type: ignore[arg-type]
     holder = session.get(Participant, held.participant_id) if held else None
+    outstanding = open_return(session, change.id)  # type: ignore[arg-type]
+
     return {
+        "state": change_state(session, change.id),  # type: ignore[arg-type]
         "assigned_to": assignee.name if assignee else None,
+        "assigned_team": team.slug if team else None,
+        "pinned": bool(assignment.pinned) if assignment else False,
         "claimed_by": holder.name if holder else None,
         "claim_expires_at": held.expires_at.isoformat() if held else None,
+        "open_question": outstanding.reason if outstanding else None,
     }

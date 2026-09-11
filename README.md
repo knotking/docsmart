@@ -21,6 +21,7 @@ what is convenient than by what a quality auditor will ask for.
 | **C — Redline** | Write tracked changes: deterministic ones by code, judgment calls by the LLM | `redline.py`, `ooxml.py`, `judge.py` |
 | **D — Review & verify** | Reviewer decisions, the verification gate, the audit trail, the API | `review.py`, `verify.py`, `audit.py`, `api.py` |
 | **D — Workflow & metrics** | Participants, assignment, leases, agent authority, sign-off, metrics | `workflow.py`, `policy.py`, `metrics.py` |
+| **D — Org & teams** | Organizations, teams, membership, routing, handoffs, cover | `teams.py` |
 | **S — Substrate** | Config, content-addressed storage, schema, document lifecycle | `config.py`, `storage.py`, `db.py`, `models.py`, `documents.py` |
 
 `pipeline.py` runs A→D over a corpus; `web/` is a dashboard that is purely a view over the
@@ -91,6 +92,10 @@ no agent signs anything off.
 **12. Decisions cannot silently overwrite each other.** A change being worked on is held
 under an expiring lease.
 
+**13–15. Work is routed, and never changes hands silently.** Teams come from the
+rulebook's `owner` fields, every movement records who moved it and why, and cover changes
+the effective owner rather than reassigning anything.
+
 ---
 
 ## Working as a team
@@ -131,6 +136,50 @@ clause; delegating them would undo the containment argument entirely.
 
 So "on what authority did a machine approve this?" has a specific answer: clause `P-001`
 of policy `ef0f2cab`, which says this, approved by quality-assurance.
+
+### Teams, and how work moves
+
+Teams are not a second thing to maintain. Every rule in the rulebook already names an
+owner, so those owner strings *are* the team list:
+
+```
+Meridian Medical
+├─ regulatory-affairs    owns R-001, R-004, R-009
+├─ clinical-affairs      owns R-002, R-010
+├─ technical-writing     owns R-003, R-006, R-008
+├─ quality-assurance     owns R-005, R-007
+└─ systems-engineering   owns R-011, R-012
+```
+
+`route_by_rule_owner` sends each change to the team that owns its rule, and any member of
+that team can claim it. A rule whose owner has no team is *reported*, not dropped into a
+default queue — work landing somewhere nobody watches is worse than work that visibly has
+nowhere to go.
+
+Four ways a change moves, each recorded with the actor and a required reason:
+
+| Handoff | What it is for |
+| --- | --- |
+| **Escalate** | A reviewer cannot decide. It goes to the team lead and is visibly *escalated* — not merely undecided, which is how hard cases sit untouched until the deadline. |
+| **Reassign** | Another person or team should own it. Naming a person pins it, so a later re-route will not quietly take it back. |
+| **Return** | Something needs answering first. The change leaves the review queue until the question is resolved, and both the question and the answer are on the record. |
+| **Cover** | Somebody is away. Their queue flows to a named stand-in and flows back when the cover lapses. |
+
+The change itself is never mutated by any of this. `change_state` — *pooled, assigned,
+escalated, returned, decided* — is derived from the handoff history, so it cannot drift
+from the events that produced it, and a change's whole routing story reads back in order:
+
+```
+route     by system  → clinical-affairs   rule owner
+escalate  by alice   → bob                cannot tell if this section is patient-facing
+reassign  by bob     → carol              regulatory owns the quoted-CFR reading
+```
+
+Two refusals worth knowing about. **An agent can never cover for a human** — an absence
+must not quietly become machine authority over work a person was meant to see. And
+**cover follows chains**: if Alice is covered by Bob and Bob by Carol, Alice's queue is
+Carol's problem. Resolving only direct delegations looks correct at every individual hop
+while dropping Alice's work on the floor.
 
 **Sign-off is maker-checker.** A run is approved by someone holding the approver role who
 recorded no decisions in it. An agent can never sign off, even if granted the role. The

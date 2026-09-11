@@ -70,6 +70,36 @@ export const api = {
   confirmAgentBatch: (runId, body) =>
     request(`/runs/${runId}/confirm-agent-batch`, { method: "POST", body: JSON.stringify(body) }),
   signoffReadiness: (runId) => request(`/runs/${runId}/signoff`),
+
+  // --- org, teams, cover ---------------------------------------------------
+  orgs: () => request("/orgs"),
+  teams: () => request("/teams"),
+  seedTeams: () => request("/teams/from-rulebook", { method: "POST" }),
+  addMember: (slug, body) =>
+    request(`/teams/${slug}/members`, { method: "POST", body: JSON.stringify(body) }),
+  removeMember: (slug, name) =>
+    request(`/teams/${slug}/members/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  describeParticipant: (name) => request(`/participants/${encodeURIComponent(name)}`),
+  delegate: (name, body) =>
+    request(`/participants/${encodeURIComponent(name)}/delegate`,
+            { method: "POST", body: JSON.stringify(body) }),
+  endDelegation: (name) =>
+    request(`/participants/${encodeURIComponent(name)}/delegate`, { method: "DELETE" }),
+
+  // --- routing and handoffs ------------------------------------------------
+  route: (runId) => request(`/runs/${runId}/route`, { method: "POST" }),
+  myQueue: (runId, participant) =>
+    request(`/runs/${runId}/my-queue?participant=${encodeURIComponent(participant)}`),
+  handoffs: (changeId) => request(`/changes/${changeId}/handoffs`),
+  reassign: (changeId, body) =>
+    request(`/changes/${changeId}/reassign`, { method: "POST", body: JSON.stringify(body) }),
+  escalate: (changeId, body) =>
+    request(`/changes/${changeId}/escalate`, { method: "POST", body: JSON.stringify(body) }),
+  returnChange: (changeId, body) =>
+    request(`/changes/${changeId}/return`, { method: "POST", body: JSON.stringify(body) }),
+  resolveReturn: (changeId, body) =>
+    request(`/changes/${changeId}/resolve-return`,
+            { method: "POST", body: JSON.stringify(body) }),
   signOff: (runId, body) =>
     request(`/runs/${runId}/signoff`, { method: "POST", body: JSON.stringify(body) }),
 

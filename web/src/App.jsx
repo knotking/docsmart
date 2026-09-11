@@ -2,10 +2,12 @@ import { useCallback, useEffect, useState } from "react";
 import { NavLink, Navigate, Route, Routes } from "react-router-dom";
 import { api } from "./api";
 import DocumentsPage from "./DocumentsPage";
+import HelpPage from "./HelpPage";
 import MetricsPage from "./MetricsPage";
 import ReviewPage from "./ReviewPage";
 import RulebookPage from "./RulebookPage";
 import RunPage from "./RunPage";
+import TeamsPage from "./TeamsPage";
 import VerifyPage from "./VerifyPage";
 import WorkflowPage from "./WorkflowPage";
 
@@ -43,6 +45,7 @@ export default function App() {
           <NavLink to="/review">Review</NavLink>
           <NavLink to="/verify">Verify</NavLink>
           <NavLink to="/documents">Documents</NavLink>
+          <NavLink to="/teams">Teams</NavLink>
           <NavLink to="/workflow">Workflow</NavLink>
         </div>
         {run && (
@@ -55,6 +58,16 @@ export default function App() {
       </nav>
 
       <main className="main">
+        <div className="topbar">
+          {run && (
+            <span className="topbar-run">
+              Run {run.run_id} · {run.changes?.pending ?? 0} pending
+            </span>
+          )}
+          <NavLink to="/help" className="help-link" title="How to use TermGuard">
+            <span aria-hidden="true">?</span> Help
+          </NavLink>
+        </div>
         <Routes>
           <Route path="/" element={<Navigate to="/metrics" replace />} />
           <Route path="/metrics" element={<MetricsPage />} />
@@ -63,6 +76,8 @@ export default function App() {
           <Route path="/review" element={<ReviewPage run={run} reload={reload} />} />
           <Route path="/verify" element={<VerifyPage run={run} />} />
           <Route path="/documents" element={<DocumentsPage />} />
+          <Route path="/help" element={<HelpPage />} />
+          <Route path="/teams" element={<TeamsPage run={run} reload={reload} />} />
           <Route path="/workflow" element={<WorkflowPage run={run} reload={reload} />} />
         </Routes>
       </main>

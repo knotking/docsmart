@@ -241,3 +241,69 @@ textarea { font-family: var(--mono); font-size: 12px; resize: vertical; }
 .kpi .card { margin: 0; }
 .hero { font-size: 34px; font-weight: 600; letter-spacing: -0.025em; line-height: 1.1; }
 .hero-unit { font-size: 15px; font-weight: 500; color: var(--muted); margin-left: 3px; }
+
+/* ---------------------------------------------------------------- top bar */
+
+.topbar {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 14px;
+  margin: -8px 0 14px;
+  min-height: 26px;
+}
+.topbar-run { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+
+.help-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 550;
+  color: var(--ink-2);
+  text-decoration: none;
+  padding: 4px 11px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--surface);
+}
+.help-link:hover { background: var(--rule-soft); color: var(--rule); border-color: var(--rule); }
+.help-link.active { background: var(--rule); border-color: var(--rule); color: #fff; }
+.help-link span[aria-hidden] {
+  font-family: var(--mono); font-weight: 700; font-size: 11px;
+  width: 14px; height: 14px; line-height: 14px; text-align: center;
+  border-radius: 50%; border: 1.5px solid currentColor;
+}
+
+/* ------------------------------------------------------------------- help */
+
+.help { max-width: 760px; }
+.help h2 { margin-top: 34px; padding-top: 16px; border-top: 1px solid var(--line); }
+.help h3 { text-transform: none; letter-spacing: 0; font-size: 14px; color: var(--ink);
+           font-weight: 600; margin-top: 20px; }
+.help p, .help li { color: var(--ink-2); }
+.help li { margin-bottom: 5px; }
+.help ul { padding-left: 20px; }
+.help .lead { font-size: 15px; color: var(--ink); }
+
+.help-toc {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 6px 18px; list-style: none; padding: 0; margin: 0; font-size: 13px;
+}
+.help-toc a { color: var(--ink-2); text-decoration: none; }
+.help-toc a:hover { color: var(--rule); text-decoration: underline; }
+
+.help-role { border-left: 3px solid var(--rule); padding: 2px 0 2px 14px; margin: 14px 0; }
+.help-role strong { color: var(--ink); }
+
+.keycap {
+  font-family: var(--mono); font-size: 11px; background: var(--bg);
+  border: 1px solid var(--line-strong); border-bottom-width: 2px;
+  border-radius: 3px; padding: 1px 6px; margin-right: 3px;
+}
+
+.help-note {
+  background: var(--rule-soft); border-radius: var(--radius);
+  padding: 11px 14px; margin: 14px 0; font-size: 13px; color: var(--ink-2);
+}
+.help-note strong { color: var(--rule); }

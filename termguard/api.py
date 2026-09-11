@@ -34,10 +34,12 @@ from pydantic import BaseModel, Field
 from sqlmodel import Session, func, select
 
 from termguard import __version__, audit, documents, metrics, review, verify, workflow
+from termguard import teams as teams_module
 from termguard.config import get_settings
 from termguard.db import get_session, init_db
 from termguard.models import (
     Change,
+    Organization,
     Participant,
     ChangeStatus,
     Decision,
@@ -49,6 +51,7 @@ from termguard.models import (
     Run,
     RunStatus,
     Stage,
+    Team,
 )
 from termguard.pipeline import run_pipeline
 from termguard.policy import load_policy
@@ -131,6 +134,25 @@ class AgentDisposeRequest(BaseModel):
 class ConfirmRequest(BaseModel):
     participant: str
     clause_id: str | None = None
+
+
+class MemberRequest(BaseModel):
+    participant: str
+    role: str = Field(default="member", description="member | lead")
+
+
+class DelegateRequest(BaseModel):
+    to: str
+    until: str | None = Field(default=None, description="ISO-8601 datetime")
+    reason: str | None = None
+    created_by: str = "api"
+
+
+class HandoffRequest(BaseModel):
+    actor: str
+    reason: str
+    to_participant: str | None = None
+    to_team: str | None = None
 
 
 class SignOffRequest(BaseModel):
@@ -921,6 +943,286 @@ def sign_off_run(
         "covered": row.covered, "rulebook_hash": row.rulebook_hash,
         "policy_hash": row.policy_hash,
     }
+
+
+# ------------------------------------------------------------ org and teams
+
+
+@app.get("/orgs")
+def list_orgs(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
+    rows = session.exec(select(Organization).order_by(Organization.name)).all()
+    return [
+        {"org_id": o.id, "name": o.name, "slug": o.slug,
+         "teams": len(session.exec(select(Team).where(Team.org_id == o.id)).all())}
+        for o in rows
+    ]
+
+
+@app.get("/teams")
+def list_teams(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
+    """Teams with their members, leads, and the rules they own."""
+    rulebook = load_rulebook(get_settings().rulebook_path)
+    owned: dict[str, list[str]] = {}
+    for rule in rulebook:
+        if rule.owner:
+            owned.setdefault(rule.owner, []).append(rule.id)
+
+    out: list[dict[str, Any]] = []
+    for team in session.exec(select(Team).order_by(Team.slug)).all():
+        team_members = teams_module.members(session, team)
+        lead_names = {p.name for p in teams_module.leads(session, team)}
+        out.append(
+            {
+                "team_id": team.id,
+                "slug": team.slug,
+                "name": team.name,
+                "description": team.description,
+                "owns_rules": sorted(owned.get(team.slug, [])),
+                "members": [
+                    {"name": p.name, "kind": p.kind.value, "roles": p.roles,
+                     "lead": p.name in lead_names}
+                    for p in team_members
+                ],
+            }
+        )
+    return out
+
+
+@app.post("/teams/from-rulebook", status_code=201)
+def seed_teams(session: Session = Depends(get_session)) -> dict[str, Any]:
+    """Create one team per distinct rule owner in the rulebook.
+
+    The rulebook already records who owns each rule, so the team list is derived from it
+    rather than maintained alongside it and allowed to drift.
+    """
+    rulebook = load_rulebook(get_settings().rulebook_path)
+    org = teams_module.default_org(session)
+    created = teams_module.teams_from_rulebook(session, rulebook, org)
+    session.commit()
+    return {
+        "org": org.slug,
+        "teams": sorted(created),
+        "owners_without_a_team": teams_module.unrouted_owners(session, rulebook),
+    }
+
+
+@app.post("/teams/{slug}/members", status_code=201)
+def add_team_member(
+    slug: str, request: MemberRequest, session: Session = Depends(get_session)
+) -> dict[str, Any]:
+    try:
+        team = teams_module.get_team(session, slug)
+        participant = workflow.get_participant(session, request.participant)
+        teams_module.add_member(session, team, participant, role=request.role)
+    except (teams_module.TeamError, workflow.WorkflowError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    session.commit()
+    return {"team": slug, "participant": request.participant, "role": request.role}
+
+
+@app.delete("/teams/{slug}/members/{name}")
+def remove_team_member(
+    slug: str, name: str, session: Session = Depends(get_session)
+) -> dict[str, Any]:
+    try:
+        team = teams_module.get_team(session, slug)
+        participant = workflow.get_participant(session, name)
+    except (teams_module.TeamError, workflow.WorkflowError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    removed = teams_module.remove_member(session, team, participant)
+    session.commit()
+    return {"team": slug, "participant": name, "removed": removed}
+
+
+# ------------------------------------------------------------- delegation
+
+
+@app.get("/participants/{name}")
+def describe_participant(name: str, session: Session = Depends(get_session)) -> dict[str, Any]:
+    """A participant with their teams and any cover in force."""
+    try:
+        participant = workflow.get_participant(session, name)
+    except workflow.WorkflowError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return teams_module.describe(session, participant)
+
+
+@app.post("/participants/{name}/delegate")
+def create_delegation(
+    name: str, request: DelegateRequest, session: Session = Depends(get_session)
+) -> dict[str, Any]:
+    """Hand this participant's queue to someone else while they are away."""
+    from datetime import datetime
+
+    try:
+        participant = workflow.get_participant(session, name)
+        cover = workflow.get_participant(session, request.to)
+        until = datetime.fromisoformat(request.until) if request.until else None
+        row = teams_module.delegate(
+            session, participant, cover, until=until, reason=request.reason,
+            created_by=request.created_by,
+        )
+    except (teams_module.TeamError, workflow.WorkflowError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    session.commit()
+    return {"participant": name, "covered_by": request.to,
+            "until": row.ends_at.isoformat() if row.ends_at else None}
+
+
+@app.delete("/participants/{name}/delegate")
+def end_delegation(
+    name: str, session: Session = Depends(get_session), by: str = "api"
+) -> dict[str, Any]:
+    try:
+        participant = workflow.get_participant(session, name)
+    except workflow.WorkflowError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    ended = teams_module.revoke_delegation(session, participant, by=by)
+    session.commit()
+    return {"participant": name, "ended": ended}
+
+
+# ---------------------------------------------------------------- routing
+
+
+@app.post("/runs/{run_id}/route")
+def route_run(
+    run_id: int, session: Session = Depends(get_session), assigned_by: str = "api"
+) -> dict[str, Any]:
+    """Send every unassigned change to the team that owns its rule."""
+    rulebook = load_rulebook(get_settings().rulebook_path)
+    result = workflow.route_by_rule_owner(session, run_id, rulebook, assigned_by=assigned_by)
+    session.commit()
+    return result
+
+
+@app.get("/runs/{run_id}/my-queue")
+def my_queue(
+    run_id: int, participant: str, session: Session = Depends(get_session)
+) -> dict[str, Any]:
+    """What one participant should be looking at: their own work, their teams' pools,
+    and anything they are covering for somebody who is away."""
+    try:
+        who = workflow.get_participant(session, participant)
+    except workflow.WorkflowError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+    change_ids = workflow.queue_for(session, run_id, who)
+    items = [
+        review.queue_item(session, session.get(Change, change_id))
+        for change_id in change_ids
+    ]
+    return {"participant": participant, "total": len(items), "items": items}
+
+
+# --------------------------------------------------------------- handoffs
+
+
+@app.get("/changes/{change_id}/handoffs")
+def change_handoffs(change_id: int, session: Session = Depends(get_session)) -> dict[str, Any]:
+    """Every movement of a change, oldest first."""
+    rows = workflow.handoffs(session, change_id)
+    return {
+        "change_id": change_id,
+        "state": workflow.change_state(session, change_id),
+        "history": [
+            {
+                "kind": row.kind.value,
+                "actor": row.actor,
+                "reason": row.reason,
+                "at": row.at.isoformat(),
+                "to_participant": (
+                    session.get(Participant, row.to_participant_id).name
+                    if row.to_participant_id else None
+                ),
+                "to_team": (
+                    session.get(Team, row.to_team_id).slug if row.to_team_id else None
+                ),
+                "resolves_handoff_id": row.resolves_handoff_id,
+            }
+            for row in rows
+        ],
+    }
+
+
+def _handoff_endpoint(change_id: int, request, session: Session, operation: str):
+    """Shared plumbing for the four handoff verbs."""
+    change = session.get(Change, change_id)
+    if change is None:
+        raise HTTPException(404, f"no change {change_id}")
+    try:
+        actor = workflow.get_participant(session, request.actor)
+        target_participant = (
+            workflow.get_participant(session, request.to_participant)
+            if getattr(request, "to_participant", None) else None
+        )
+        target_team = (
+            teams_module.get_team(session, request.to_team)
+            if getattr(request, "to_team", None) else None
+        )
+    except (workflow.WorkflowError, teams_module.TeamError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    try:
+        if operation == "reassign":
+            row = workflow.reassign(session, change.run_id, change_id, actor=actor,
+                                    to_participant=target_participant, to_team=target_team,
+                                    reason=request.reason)
+        elif operation == "escalate":
+            row = workflow.escalate(session, change.run_id, change_id, actor=actor,
+                                    reason=request.reason, to=target_participant)
+        elif operation == "return":
+            row = workflow.return_for_clarification(
+                session, change.run_id, change_id, actor=actor, reason=request.reason,
+                to_participant=target_participant, to_team=target_team,
+            )
+        else:
+            row = workflow.resolve_return(session, change.run_id, change_id, actor=actor,
+                                          answer=request.reason)
+    except workflow.WorkflowError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    session.commit()
+    return {
+        "change_id": change_id,
+        "kind": row.kind.value,
+        "actor": row.actor,
+        "reason": row.reason,
+        "state": workflow.change_state(session, change_id),
+        "to": (
+            session.get(Participant, row.to_participant_id).name
+            if row.to_participant_id
+            else (session.get(Team, row.to_team_id).slug if row.to_team_id else None)
+        ),
+    }
+
+
+@app.post("/changes/{change_id}/reassign")
+def reassign_change(change_id: int, request: HandoffRequest,
+                    session: Session = Depends(get_session)) -> dict[str, Any]:
+    """Move a change to another person or team, with a recorded reason."""
+    return _handoff_endpoint(change_id, request, session, "reassign")
+
+
+@app.post("/changes/{change_id}/escalate")
+def escalate_change(change_id: int, request: HandoffRequest,
+                    session: Session = Depends(get_session)) -> dict[str, Any]:
+    """Send a change up to a team lead. It stays open and visibly escalated."""
+    return _handoff_endpoint(change_id, request, session, "escalate")
+
+
+@app.post("/changes/{change_id}/return")
+def return_change(change_id: int, request: HandoffRequest,
+                  session: Session = Depends(get_session)) -> dict[str, Any]:
+    """Send a change back with a question. It leaves the review queue until answered."""
+    return _handoff_endpoint(change_id, request, session, "return")
+
+
+@app.post("/changes/{change_id}/resolve-return")
+def resolve_change_return(change_id: int, request: HandoffRequest,
+                          session: Session = Depends(get_session)) -> dict[str, Any]:
+    """Answer an outstanding return so the change re-enters the queue."""
+    return _handoff_endpoint(change_id, request, session, "resolve")
 
 
 # ------------------------------------------------------------ static frontend

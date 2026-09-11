@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "./api";
-import { Empty, ErrorBanner, InlineDiff, MechanismBadge } from "./components";
+import { Badge, Empty, ErrorBanner, InlineDiff, MechanismBadge } from "./components";
 
 /**
  * The reviewer queue — the screen that actually gets used.
@@ -18,6 +18,12 @@ export default function ReviewPage({ run, reload }) {
   );
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [moving, setMoving] = useState(null);   // null | "escalate" | "reassign" | "return"
+  const [moveReason, setMoveReason] = useState("");
+  const [moveTarget, setMoveTarget] = useState("");
+  const [teams, setTeams] = useState([]);
+  const [people, setPeople] = useState([]);
+  const [history, setHistory] = useState(null);
 
   const load = useCallback(async () => {
     if (!run) return;
@@ -38,7 +44,55 @@ export default function ReviewPage({ run, reload }) {
     localStorage.setItem("termguard.reviewer", reviewer);
   }, [reviewer]);
 
+  useEffect(() => {
+    Promise.all([api.teams(), api.participants()])
+      .then(([t, p]) => {
+        setTeams(t);
+        setPeople(p);
+      })
+      .catch(() => {
+        /* teams are optional: a single-reviewer setup has none */
+      });
+  }, []);
+
   const current = items[selected];
+
+  useEffect(() => {
+    setMoving(null);
+    setMoveReason("");
+    setHistory(null);
+    if (!current) return;
+    api.handoffs(current.change_id).then(setHistory).catch(() => setHistory(null));
+  }, [current?.change_id]);
+
+  /** Escalate / reassign / return / resolve — every one needs a recorded reason. */
+  const move = async (kind) => {
+    if (!current || !moveReason.trim()) return;
+    setBusy(true);
+    try {
+      const body = { actor: reviewer, reason: moveReason.trim() };
+      if (kind !== "escalate" && kind !== "resolve" && moveTarget) {
+        if (moveTarget.startsWith("team:")) body.to_team = moveTarget.slice(5);
+        else body.to_participant = moveTarget;
+      }
+      if (kind === "escalate" && moveTarget) body.to_participant = moveTarget;
+
+      if (kind === "escalate") await api.escalate(current.change_id, body);
+      else if (kind === "reassign") await api.reassign(current.change_id, body);
+      else if (kind === "return") await api.returnChange(current.change_id, body);
+      else await api.resolveReturn(current.change_id, body);
+
+      setMoving(null);
+      setMoveReason("");
+      setMoveTarget("");
+      await load();
+      reload();
+    } catch (caught) {
+      setError(caught);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const decide = useCallback(
     async (decision, finalText) => {
@@ -154,6 +208,11 @@ export default function ReviewPage({ run, reload }) {
               >
                 <div className="file">
                   {item.file} · {item.part}
+                  {item.assigned_to
+                    ? ` · ${item.assigned_to.split("@")[0]}`
+                    : item.assigned_team
+                    ? ` · ${item.assigned_team}`
+                    : ""}
                 </div>
                 <div className="term">
                   {item.original_text}
@@ -230,8 +289,91 @@ export default function ReviewPage({ run, reload }) {
               </div>
             )}
 
+            {history?.state && history.state !== "pooled" && history.state !== "assigned" && (
+              <div style={{ marginTop: 14 }}>
+                <Badge kind={history.state === "returned" ? "warn" : "rule"}>
+                  {history.state}
+                </Badge>
+              </div>
+            )}
+
+            {history?.history?.length > 1 && (
+              <>
+                <h3 style={{ marginTop: 16 }}>How it got here</h3>
+                <div className="timeline">
+                  {history.history.map((step, index) => (
+                    <div className="tl-item" key={index}>
+                      <div className="when">{new Date(step.at).toLocaleString()}</div>
+                      <div>
+                        <code>{step.kind}</code> by {step.actor}
+                        {step.to_participant || step.to_team
+                          ? ` → ${step.to_participant || step.to_team}`
+                          : ""}
+                        {step.reason && (
+                          <div className="sub" style={{ margin: 0 }}>{step.reason}</div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+
+            {moving && (
+              <div style={{ marginTop: 14 }}>
+                <h3>
+                  {moving === "escalate" && "Escalate to a lead"}
+                  {moving === "reassign" && "Hand to someone else"}
+                  {moving === "return" && "Return with a question"}
+                  {moving === "resolve" && "Answer the return"}
+                </h3>
+                {moving !== "resolve" && (
+                  <select
+                    value={moveTarget}
+                    onChange={(event) => setMoveTarget(event.target.value)}
+                    style={{ marginBottom: 8 }}
+                  >
+                    <option value="">
+                      {moving === "escalate" ? "the owning team's lead" : "choose a destination…"}
+                    </option>
+                    {teams.map((team) => (
+                      <option key={team.slug} value={`team:${team.slug}`}>
+                        team · {team.name}
+                      </option>
+                    ))}
+                    {people.filter((p) => p.kind === "human").map((person) => (
+                      <option key={person.name} value={person.name}>{person.name}</option>
+                    ))}
+                  </select>
+                )}
+                <textarea
+                  rows={2}
+                  autoFocus
+                  placeholder={
+                    moving === "return"
+                      ? "What do you need answered before this can be decided?"
+                      : "Why is this moving? This goes on the record."
+                  }
+                  value={moveReason}
+                  onChange={(event) => setMoveReason(event.target.value)}
+                />
+                <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                  <button
+                    className="primary"
+                    disabled={busy || !moveReason.trim()}
+                    onClick={() => move(moving)}
+                  >
+                    Confirm
+                  </button>
+                  <button onClick={() => { setMoving(null); setMoveReason(""); }}>
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+
             <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
-              {editing === null ? (
+              {editing === null && moving === null ? (
                 <>
                   <button className="accept" onClick={() => decide("accepted")} disabled={busy}>
                     Accept
@@ -242,8 +384,27 @@ export default function ReviewPage({ run, reload }) {
                   <button onClick={() => setEditing(proposedSentence(current))} disabled={busy}>
                     Edit
                   </button>
+                  <span style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+                    {history?.state === "returned" ? (
+                      <button onClick={() => setMoving("resolve")} disabled={busy}>
+                        Answer return
+                      </button>
+                    ) : (
+                      <>
+                        <button onClick={() => setMoving("escalate")} disabled={busy}>
+                          Escalate
+                        </button>
+                        <button onClick={() => setMoving("reassign")} disabled={busy}>
+                          Hand off
+                        </button>
+                        <button onClick={() => setMoving("return")} disabled={busy}>
+                          Return
+                        </button>
+                      </>
+                    )}
+                  </span>
                 </>
-              ) : (
+              ) : editing !== null ? (
                 <>
                   <button
                     className="primary"
@@ -254,7 +415,7 @@ export default function ReviewPage({ run, reload }) {
                   </button>
                   <button onClick={() => setEditing(null)}>Cancel</button>
                 </>
-              )}
+              ) : null}
             </div>
 
             <p className="keys">

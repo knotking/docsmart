@@ -174,13 +174,15 @@ def assign(
 
 
 def current_assignee(session: Session, change_id: int) -> Participant | None:
-    """The newest assignment for a change."""
-    row = session.exec(
-        select(Assignment)
-        .where(Assignment.change_id == change_id)
-        .order_by(Assignment.id.desc())  # type: ignore[union-attr]
-    ).first()
-    return session.get(Participant, row.participant_id) if row else None
+    """The named person a change is assigned to.
+
+    None for a change sitting in a team pool - that is not "unassigned", it is assigned to
+    a group. Use :func:`current_assignment` when the distinction matters.
+    """
+    row = current_assignment(session, change_id)
+    if row is None or row.participant_id is None:
+        return None
+    return session.get(Participant, row.participant_id)
 
 
 def auto_assign(
@@ -620,3 +622,381 @@ def sign_off(
     )
     session.commit()
     return row
+
+
+# ------------------------------------------------------- routing and handoff
+#
+# Work reaches a team pool, a member claims it, and every subsequent movement is recorded
+# as a Handoff rather than by mutating the change. That matters for the same reason the
+# decision log is append-only: "who had this, and why did it move" is a question asked
+# months later, and a mutable owner field cannot answer it.
+
+
+def current_assignment(session: Session, change_id: int):
+    """The newest assignment row for a change, or None."""
+    from termguard.models import Assignment as AssignmentRow
+
+    return session.exec(
+        select(AssignmentRow)
+        .where(AssignmentRow.change_id == change_id)
+        .order_by(AssignmentRow.id.desc())  # type: ignore[union-attr]
+    ).first()
+
+
+def assign_to_team(
+    session: Session,
+    run_id: int,
+    change_ids: Sequence[int],
+    team,
+    *,
+    assigned_by: str = "system",
+    reason: str | None = None,
+    kind=None,
+) -> int:
+    """Route changes into a team's pool. Any active member may then claim one."""
+    from termguard.models import Assignment as AssignmentRow
+    from termguard.models import Handoff, HandoffKind
+
+    kind = kind or HandoffKind.ROUTE
+    for change_id in change_ids:
+        previous = current_assignment(session, change_id)
+        session.add(AssignmentRow(
+            run_id=run_id, change_id=change_id, team_id=team.id,
+            assigned_by=assigned_by, reason=reason,
+        ))
+        session.add(Handoff(
+            run_id=run_id, change_id=change_id, kind=kind,
+            from_participant_id=previous.participant_id if previous else None,
+            from_team_id=previous.team_id if previous else None,
+            to_team_id=team.id, actor=assigned_by, reason=reason,
+        ))
+    session.flush()
+    audit.record(
+        session, f"changes.{kind.value}",
+        summary=f"{len(change_ids)} change(s) -> team {team.name}"
+                + (f" ({reason})" if reason else ""),
+        actor=assigned_by, run_id=run_id,
+        payload={"team": team.slug, "count": len(change_ids), "reason": reason},
+    )
+    return len(change_ids)
+
+
+def route_by_rule_owner(
+    session: Session, run_id: int, rulebook, *, assigned_by: str = "system"
+) -> dict[str, Any]:
+    """Send every unassigned change to the team that owns its rule.
+
+    The rulebook already records an owner per rule, so this needs no separate mapping.
+    Rules whose owner has no team are reported rather than dropped into a default queue -
+    silently defaulting is how work ends up somewhere nobody is watching.
+    """
+    from termguard import teams as teams_module
+    from termguard.models import Hit
+
+    missing = teams_module.unrouted_owners(session, rulebook)
+    by_team: dict[str, list[int]] = {}
+    unroutable: list[int] = []
+
+    for change in _undecided_changes(session, run_id):
+        assignment = current_assignment(session, change.id)
+        if assignment is not None and assignment.pinned:
+            continue  # a pinned owner is a deliberate choice; routing must not undo it
+        hit = session.get(Hit, change.hit_id) if change.hit_id else None
+        team = (
+            teams_module.team_for_rule(session, rulebook, hit.rule_id) if hit else None
+        )
+        if team is None:
+            unroutable.append(change.id)  # type: ignore[arg-type]
+            continue
+        by_team.setdefault(team.slug, []).append(change.id)  # type: ignore[arg-type]
+
+    routed: dict[str, int] = {}
+    for slug, change_ids in sorted(by_team.items()):
+        team = teams_module.get_team(session, slug)
+        routed[slug] = assign_to_team(
+            session, run_id, change_ids, team,
+            assigned_by=assigned_by, reason="rule owner",
+        )
+
+    return {
+        "routed": routed,
+        "total": sum(routed.values()),
+        "unroutable": len(unroutable),
+        "owners_without_a_team": missing,
+    }
+
+
+def _record_handoff(
+    session: Session,
+    run_id: int,
+    change_id: int,
+    kind,
+    *,
+    actor: str,
+    reason: str,
+    to_participant=None,
+    to_team=None,
+    resolves: int | None = None,
+):
+    from termguard.models import Assignment as AssignmentRow
+    from termguard.models import Handoff
+
+    previous = current_assignment(session, change_id)
+    row = Handoff(
+        run_id=run_id, change_id=change_id, kind=kind,
+        from_participant_id=previous.participant_id if previous else None,
+        from_team_id=previous.team_id if previous else None,
+        to_participant_id=to_participant.id if to_participant else None,
+        to_team_id=to_team.id if to_team else None,
+        actor=actor, reason=reason, resolves_handoff_id=resolves,
+    )
+    session.add(row)
+
+    if to_participant is not None or to_team is not None:
+        session.add(AssignmentRow(
+            run_id=run_id, change_id=change_id,
+            participant_id=to_participant.id if to_participant else None,
+            team_id=to_team.id if to_team else None,
+            pinned=to_participant is not None,
+            assigned_by=actor, reason=reason,
+        ))
+    session.flush()
+    return row
+
+
+def reassign(
+    session: Session, run_id: int, change_id: int, *, actor: Participant,
+    to_participant: Participant | None = None, to_team=None, reason: str,
+):
+    """Hand a change to another person or team, with a recorded reason."""
+    if not reason.strip():
+        raise WorkflowError("a reassignment must say why; work changing hands silently "
+                            "is the thing this record exists to prevent")
+    if to_participant is None and to_team is None:
+        raise WorkflowError("reassign needs a destination participant or team")
+
+    from termguard.models import HandoffKind
+
+    # The lease belongs to whoever was working it; it does not travel with the change.
+    held = active_claim(session, change_id)
+    if held is not None:
+        holder = session.get(Participant, held.participant_id)
+        if holder is not None:
+            release(session, change_id, holder)
+
+    row = _record_handoff(
+        session, run_id, change_id, HandoffKind.REASSIGN, actor=actor.name,
+        reason=reason, to_participant=to_participant, to_team=to_team,
+    )
+    destination = to_participant.name if to_participant else to_team.name
+    audit.record(
+        session, "change.reassigned",
+        summary=f"{actor.name} reassigned change {change_id} to {destination}: {reason}",
+        actor=actor.name, actor_kind=ActorKind.HUMAN, run_id=run_id, change_id=change_id,
+        payload={"to": destination, "reason": reason,
+                 "pinned": to_participant is not None},
+    )
+    return row
+
+
+def escalate(
+    session: Session, run_id: int, change_id: int, *, actor: Participant, reason: str,
+    to: Participant | None = None,
+):
+    """Send a change a reviewer cannot decide up to a team lead.
+
+    The change stays open and *visibly* escalated. Leaving it undecided instead would be
+    indistinguishable from nobody having looked at it yet, which is how hard cases sit
+    untouched until the deadline.
+    """
+    if not reason.strip():
+        raise WorkflowError("an escalation must say what the reviewer could not decide")
+
+    from termguard import teams as teams_module
+    from termguard.models import HandoffKind, Team
+
+    target = to
+    if target is None:
+        assignment = current_assignment(session, change_id)
+        team = (
+            session.get(Team, assignment.team_id)
+            if assignment and assignment.team_id else None
+        )
+        if team is None:
+            for candidate in teams_module.teams_of(session, actor):
+                if teams_module.leads(session, candidate):
+                    team = candidate
+                    break
+        candidates = teams_module.leads(session, team) if team else []
+        candidates = [p for p in candidates if p.id != actor.id]
+        if not candidates:
+            raise WorkflowError(
+                "no team lead to escalate to; give the owning team a lead "
+                "(teams.add_member(..., role='lead')) or name one explicitly"
+            )
+        target = candidates[0]
+
+    row = _record_handoff(
+        session, run_id, change_id, HandoffKind.ESCALATE, actor=actor.name,
+        reason=reason, to_participant=target,
+    )
+    audit.record(
+        session, "change.escalated",
+        summary=f"{actor.name} escalated change {change_id} to {target.name}: {reason}",
+        actor=actor.name, actor_kind=ActorKind.HUMAN, run_id=run_id, change_id=change_id,
+        payload={"to": target.name, "reason": reason},
+    )
+    return row
+
+
+def return_for_clarification(
+    session: Session, run_id: int, change_id: int, *, actor: Participant, reason: str,
+    to_team=None, to_participant: Participant | None = None,
+):
+    """Send a change back with a question. It leaves the review queue until answered."""
+    if not reason.strip():
+        raise WorkflowError("a return must carry the question being asked")
+    if to_team is None and to_participant is None:
+        raise WorkflowError("a return needs somewhere to go back to")
+
+    from termguard.models import HandoffKind
+
+    held = active_claim(session, change_id)
+    if held is not None:
+        holder = session.get(Participant, held.participant_id)
+        if holder is not None:
+            release(session, change_id, holder)
+
+    row = _record_handoff(
+        session, run_id, change_id, HandoffKind.RETURN, actor=actor.name, reason=reason,
+        to_participant=to_participant, to_team=to_team,
+    )
+    destination = to_participant.name if to_participant else to_team.name
+    audit.record(
+        session, "change.returned",
+        summary=f"{actor.name} returned change {change_id} to {destination}: {reason}",
+        actor=actor.name, actor_kind=ActorKind.HUMAN, run_id=run_id, change_id=change_id,
+        payload={"to": destination, "question": reason},
+    )
+    return row
+
+
+def resolve_return(
+    session: Session, run_id: int, change_id: int, *, actor: Participant, answer: str,
+):
+    """Answer an outstanding return so the change re-enters the review queue."""
+    if not answer.strip():
+        raise WorkflowError("resolving a return requires the answer")
+
+    from termguard.models import HandoffKind, Team
+
+    outstanding = open_return(session, change_id)
+    if outstanding is None:
+        raise WorkflowError(f"change {change_id} has no outstanding return")
+
+    row = _record_handoff(
+        session, run_id, change_id, HandoffKind.RESOLVE, actor=actor.name, reason=answer,
+        to_participant=(
+            session.get(Participant, outstanding.from_participant_id)
+            if outstanding.from_participant_id else None
+        ),
+        to_team=(
+            session.get(Team, outstanding.from_team_id)
+            if outstanding.from_team_id else None
+        ),
+        resolves=outstanding.id,
+    )
+    audit.record(
+        session, "change.return_resolved",
+        summary=f"{actor.name} answered the return on change {change_id}",
+        actor=actor.name, actor_kind=ActorKind.HUMAN, run_id=run_id, change_id=change_id,
+        payload={"answer": answer, "resolves_handoff_id": outstanding.id},
+    )
+    return row
+
+
+def handoffs(session: Session, change_id: int):
+    """Every movement of a change, oldest first - its routing history."""
+    from termguard.models import Handoff
+
+    return list(session.exec(
+        select(Handoff).where(Handoff.change_id == change_id).order_by(Handoff.id)
+    ).all())
+
+
+def open_return(session: Session, change_id: int):
+    """The unanswered return on a change, if there is one."""
+    from termguard.models import HandoffKind
+
+    history = handoffs(session, change_id)
+    answered = {h.resolves_handoff_id for h in history if h.resolves_handoff_id}
+    for row in reversed(history):
+        if row.kind is HandoffKind.RETURN and row.id not in answered:
+            return row
+    return None
+
+
+def change_state(session: Session, change_id: int) -> str:
+    """Where a change sits: decided | returned | escalated | assigned | pooled | unassigned.
+
+    Derived from the handoff history rather than stored, so it cannot drift from the
+    events that produced it.
+    """
+    from termguard.models import Decision, HandoffKind
+
+    decided = session.exec(
+        select(Decision).where(Decision.change_id == change_id)
+    ).first()
+    if decided is not None:
+        return "decided"
+    if open_return(session, change_id) is not None:
+        return "returned"
+
+    history = handoffs(session, change_id)
+    if history and history[-1].kind is HandoffKind.ESCALATE:
+        return "escalated"
+
+    assignment = current_assignment(session, change_id)
+    if assignment is None:
+        return "unassigned"
+    return "assigned" if assignment.participant_id else "pooled"
+
+
+def queue_for(session: Session, run_id: int, participant: Participant) -> list[int]:
+    """The change ids this participant should be looking at.
+
+    Their own assignments, their teams' pools, and anything they are covering for someone
+    who is away. Returned changes are excluded - they are waiting on someone else.
+    """
+    from termguard import teams as teams_module
+    from termguard.models import Delegation
+
+    # Every participant whose work currently lands on me, following chains: if Alice is
+    # covered by Bob and Bob is covered by Zoe, Alice's queue is Zoe's problem. Looking
+    # only at delegations addressed directly to me would drop Alice on the floor while
+    # every individual hop still looked correct.
+    covering = {participant.id}
+    delegated_ids = {
+        row.participant_id for row in session.exec(select(Delegation)).all()
+    }
+    for covered_id in delegated_ids:
+        covered = session.get(Participant, covered_id)
+        if covered is None:
+            continue
+        if teams_module.effective_owner(session, covered).id == participant.id:
+            covering.add(covered_id)
+
+    team_ids = {team.id for team in teams_module.teams_of(session, participant)}
+
+    out: list[int] = []
+    for change in _undecided_changes(session, run_id):
+        if change_state(session, change.id) == "returned":
+            continue
+        assignment = current_assignment(session, change.id)
+        if assignment is None:
+            continue
+        if assignment.participant_id in covering:
+            out.append(change.id)  # type: ignore[arg-type]
+        elif assignment.participant_id is None and assignment.team_id in team_ids:
+            out.append(change.id)  # type: ignore[arg-type]
+    return out

@@ -382,10 +382,17 @@ class Assignment(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     run_id: int = Field(foreign_key="run.id", index=True)
     change_id: int = Field(foreign_key="change.id", index=True)
-    participant_id: int = Field(foreign_key="participant.id", index=True)
+
+    # Exactly one of these is the owner. A team assignment is a pool any member may
+    # claim; a participant assignment names one person. `pinned` marks a person
+    # assignment that a re-route must not quietly overwrite.
+    participant_id: Optional[int] = Field(default=None, foreign_key="participant.id", index=True)
+    team_id: Optional[int] = Field(default=None, foreign_key="team.id", index=True)
+    pinned: bool = Field(default=False, index=True)
+
     assigned_by: str = Field(default="system")
     assigned_at: datetime = Field(default_factory=utcnow, index=True)
-    reason: Optional[str] = Field(default=None, description="why this reviewer, e.g. 'by rule'")
+    reason: Optional[str] = Field(default=None, description="why this owner, e.g. 'rule owner'")
 
 
 class Claim(SQLModel, table=True):
@@ -434,3 +441,123 @@ class SignOff(SQLModel, table=True):
     corpus_hash: str = ""
     policy_hash: str = ""
     covered: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+
+
+# ----------------------------------------------------------- org and teams
+#
+# Structure, not tenancy. Organizations and teams group people and route work; no query
+# is scoped by them, and the CLAUDE.md "no multi-tenancy" constraint stands. IAM in front
+# of the service is still the real access boundary.
+#
+# Team slugs match the `owner` field the rulebook already carries on every rule, so work
+# routes to the team that owns the rule without anyone maintaining a second mapping.
+
+
+class TeamRole(str, Enum):
+    MEMBER = "member"
+    LEAD = "lead"      # escalation target for the team
+
+
+class HandoffKind(str, Enum):
+    """How a change moved. Every movement is recorded; none of them mutate the change."""
+
+    ROUTE = "route"          # first placement, from the rule's owning team
+    REASSIGN = "reassign"    # moved to another person or team, with a reason
+    ESCALATE = "escalate"    # a reviewer could not decide; sent to the team lead
+    RETURN = "return"        # sent back for clarification; leaves the review queue
+    RESOLVE = "resolve"      # a return was answered; the change re-enters the queue
+    DELEGATE = "delegate"    # covered while the owner is away
+
+
+class Organization(SQLModel, table=True):
+    __tablename__ = "organization"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str
+    slug: str = Field(index=True)
+    created_at: datetime = Field(default_factory=utcnow)
+
+    __table_args__ = (UniqueConstraint("slug", name="uq_org_slug"),)
+
+
+class Team(SQLModel, table=True):
+    """A functional group. ``slug`` is the join to the rulebook's ``owner`` field."""
+
+    __tablename__ = "team"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    org_id: int = Field(foreign_key="organization.id", index=True)
+    name: str
+    slug: str = Field(index=True, description="matches a rulebook rule's `owner`")
+    description: Optional[str] = Field(default=None, sa_column=Column(Text))
+    created_at: datetime = Field(default_factory=utcnow)
+
+    # Globally unique, not per-org: routing resolves a team by slug alone, so two orgs
+    # holding the same slug would make every lookup ambiguous. Orgs are structure here,
+    # not tenancy, so one team per slug per deployment is the honest constraint.
+    __table_args__ = (UniqueConstraint("slug", name="uq_team_slug"),)
+
+
+class Membership(SQLModel, table=True):
+    """A participant's place in a team. Leaving sets ``left_at`` rather than deleting."""
+
+    __tablename__ = "membership"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    team_id: int = Field(foreign_key="team.id", index=True)
+    participant_id: int = Field(foreign_key="participant.id", index=True)
+    team_role: TeamRole = Field(default=TeamRole.MEMBER, index=True)
+    joined_at: datetime = Field(default_factory=utcnow)
+    left_at: Optional[datetime] = Field(default=None, index=True)
+
+    __table_args__ = (Index("ix_membership_team_active", "team_id", "left_at"),)
+
+
+class Delegation(SQLModel, table=True):
+    """Cover while someone is away.
+
+    A delegation does not move any assignment. It changes who the *effective* owner of a
+    change is while it is in force, and lapses on its own. Reassigning a hundred changes
+    because someone took a week off, then reassigning them back, is how work gets lost.
+    """
+
+    __tablename__ = "delegation"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    participant_id: int = Field(foreign_key="participant.id", index=True)
+    delegate_id: int = Field(foreign_key="participant.id", index=True)
+    starts_at: datetime = Field(default_factory=utcnow, index=True)
+    ends_at: Optional[datetime] = Field(default=None, index=True)
+    reason: Optional[str] = None
+    revoked_at: Optional[datetime] = None
+    created_by: str = "system"
+
+
+class Handoff(SQLModel, table=True):
+    """One movement of a change between owners. Append-only.
+
+    The reason is required for every kind except the initial route. Work changing hands
+    without a recorded reason is exactly the thing an auditor asks about, and "the system
+    moved it" is not an answer.
+    """
+
+    __tablename__ = "handoff"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    run_id: int = Field(foreign_key="run.id", index=True)
+    change_id: int = Field(foreign_key="change.id", index=True)
+    kind: HandoffKind = Field(index=True)
+
+    from_participant_id: Optional[int] = Field(default=None, foreign_key="participant.id")
+    from_team_id: Optional[int] = Field(default=None, foreign_key="team.id")
+    to_participant_id: Optional[int] = Field(default=None, foreign_key="participant.id", index=True)
+    to_team_id: Optional[int] = Field(default=None, foreign_key="team.id", index=True)
+
+    actor: str = Field(index=True)
+    reason: Optional[str] = Field(default=None, sa_column=Column(Text))
+    at: datetime = Field(default_factory=utcnow, index=True)
+
+    # A RETURN is answered by a later RESOLVE naming it.
+    resolves_handoff_id: Optional[int] = Field(default=None, foreign_key="handoff.id", index=True)
+
+    __table_args__ = (Index("ix_handoff_change_at", "change_id", "at"),)

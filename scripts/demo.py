@@ -18,9 +18,12 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from termguard import documents, review, verify, workflow  # noqa: E402
-from termguard.models import DecisionKind, ParticipantKind, Role, SignOffDecision  # noqa: E402
+from termguard import documents, review, teams, verify, workflow  # noqa: E402
+from termguard.models import (  # noqa: E402
+    DecisionKind, ParticipantKind, Role, SignOffDecision, TeamRole,
+)
 from termguard.policy import load_policy  # noqa: E402
+from termguard.rulebook import load_rulebook  # noqa: E402
 from termguard.config import get_settings  # noqa: E402
 from termguard.db import init_db, session_scope  # noqa: E402
 from termguard.pipeline import run_pipeline  # noqa: E402
@@ -164,22 +167,40 @@ def main() -> int:
 
 def _run_workflow(settings, run_id: int, approver_email: str) -> None:
     """Two reviewers and an agent clear the queue, with claims and policy in force."""
-    heading("2. Review: two reviewers and an agent")
+    heading("2. Review: five teams, four people and an agent")
     policy = load_policy(REPO_ROOT / "data" / "policy.yaml")
+    rulebook = load_rulebook(settings.rulebook_path)
 
     with session_scope(settings) as session:
+        # --- org and teams, derived from who owns each rule -----------------
+        org = teams.ensure_org(session, "Meridian Medical", "meridian")
+        made = teams.teams_from_rulebook(session, rulebook, org)
+        print(f"  org {org.name}: {len(made)} teams, one per rule owner")
+        for slug, team in sorted(made.items()):
+            print(f"    {slug:22} {team.description}")
+        missing = teams.unrouted_owners(session, rulebook)
+        if missing:
+            print(f"    owners with no team: {missing}")
+
+        # --- people ----------------------------------------------------------
         alice = workflow.ensure_participant(session, "alice@meridian", roles=[Role.REVIEWER])
         bob = workflow.ensure_participant(session, "bob@meridian", roles=[Role.REVIEWER])
+        carol = workflow.ensure_participant(session, "carol@meridian", roles=[Role.REVIEWER])
         dana = workflow.ensure_participant(session, "dana@meridian", roles=[Role.APPROVER])
         agent = workflow.ensure_participant(
             session, "termguard-agent", kind=ParticipantKind.AGENT, roles=[Role.REVIEWER],
             model=settings.anthropic_model, policy_hash=policy.hash,
         )
-        print(f"  participants: alice, bob (reviewers), dana (approver), "
-              f"{agent.name} (agent)")
-        print(f"  policy {policy.hash}: agents may decide "
-              f"{', '.join(policy.summary()['rules_agents_may_decide'])} and nothing else")
+        teams.add_member(session, made["clinical-affairs"], alice)
+        teams.add_member(session, made["clinical-affairs"], bob, role=TeamRole.LEAD)
+        teams.add_member(session, made["regulatory-affairs"], carol, role=TeamRole.LEAD)
+        for slug in ("technical-writing", "quality-assurance", "systems-engineering"):
+            teams.add_member(session, made[slug], alice)
+            teams.add_member(session, made[slug], bob)
+        print(f"\n  alice, bob (clinical + 3 others; bob leads clinical), "
+              f"carol (leads regulatory), dana (approver), {agent.name}")
 
+        # --- the agent takes what policy allows ------------------------------
         outcome = workflow.agent_dispose(session, run_id, agent, policy)
         print(f"\n  agent decided {outcome.decided} "
               f"({', '.join(f'{k}:{v}' for k, v in outcome.by_clause.items())}), "
@@ -187,26 +208,61 @@ def _run_workflow(settings, run_id: int, approver_email: str) -> None:
         if outcome.needs_confirmation:
             print(f"    {outcome.needs_confirmation} of those need a human to confirm")
 
-        spread = workflow.auto_assign(session, run_id, [alice, bob], strategy="by_file")
-        print(f"\n  assigned by file: "
-              + ", ".join(f"{name.split('@')[0]} {count}" for name, count in spread.items()))
+        # --- the rest routes to the team that owns the rule ------------------
+        routed = workflow.route_by_rule_owner(session, run_id, rulebook)
+        print(f"\n  routed to the owning team: "
+              + ", ".join(f"{slug.split('-')[0]} {n}" for slug, n in sorted(routed["routed"].items())))
+        if routed["unroutable"]:
+            print(f"    {routed['unroutable']} could not be routed")
 
-        # Reviewers work their own queues, claiming each change so they cannot collide.
-        decided = {"accepted": 0, "rejected": 0, "edited": 0}
+        # --- one change takes the scenic route --------------------------------
+        queue = workflow.queue_for(session, run_id, alice)
+        if queue:
+            travelled = queue[0]
+            workflow.escalate(session, run_id, travelled, actor=alice,
+                              reason="cannot tell if this section is patient-facing")
+            workflow.reassign(session, run_id, travelled, actor=bob, to_participant=carol,
+                              reason="regulatory owns the quoted-CFR reading")
+            print(f"\n  change {travelled}: alice escalated it to bob (clinical lead),")
+            print(f"    who handed it to carol in regulatory - state now "
+                  f"{workflow.change_state(session, travelled)}")
+
+        # --- alice goes on leave ------------------------------------------------
+        teams.delegate(session, alice, bob, reason="annual leave", created_by="dana@meridian")
+        print(f"\n  alice is away; her work is covered by "
+              f"{teams.effective_owner(session, alice).name}")
+
+        # --- everyone works their queue ------------------------------------------
+        decided = 0
         for change in list(review.pending_changes(session, run_id)):
-            assignee = workflow.current_assignee(session, change.id) or alice
-            workflow.claim(session, change.id, assignee)
-            review.record_decision(
-                session, change.id, DecisionKind.ACCEPTED, assignee.name,
-                participant=assignee,
+            owner = (
+                workflow.current_assignee(session, change.id)
+                or _pool_member(session, change.id, [bob, carol, alice])
             )
-            workflow.release(session, change.id, assignee)
-            decided["accepted"] += 1
-        print(f"  reviewers decided {decided['accepted']}")
+            owner = teams.effective_owner(session, owner)
+            workflow.claim(session, change.id, owner)
+            review.record_decision(session, change.id, DecisionKind.ACCEPTED, owner.name,
+                                   participant=owner)
+            workflow.release(session, change.id, owner)
+            decided += 1
+        print(f"  reviewers decided {decided}")
 
-        confirmed = workflow.confirm_agent_batch(session, run_id, alice)
+        confirmed = workflow.confirm_agent_batch(session, run_id, bob)
         if confirmed:
-            print(f"  alice confirmed {confirmed} agent decision(s) that required it")
+            print(f"  bob confirmed {confirmed} agent decision(s) that required it")
+
+
+def _pool_member(session, change_id: int, candidates):
+    """Whoever on the owning team picks a pooled change up first."""
+    from termguard.models import Team
+
+    assignment = workflow.current_assignment(session, change_id)
+    if assignment is None or assignment.team_id is None:
+        return candidates[0]
+    team = session.get(Team, assignment.team_id)
+    members = teams.members(session, team) if team else []
+    human = [p for p in members if not p.is_agent]
+    return human[0] if human else candidates[0]
 
 
 def _inject(data: bytes) -> bytes:

@@ -359,3 +359,118 @@ def build_comment_element(
     node.text = text
     node.set(f"{{{XML}}}space", "preserve")
     return comment
+
+
+# ----------------------------------------------------------- resolving revisions
+#
+# Turning a redlined document into an "as-accepted" one. Word does this when a reviewer
+# clicks Accept; :mod:`termguard.verify` does it here so the final text can be re-scanned
+# and proved clean. Works uniformly across every part, because ``docx-editor``'s revision
+# ids are the ``w:id`` attributes it writes, and the raw engine allocates ids above
+# ``RAW_ID_BASE`` - so one id space addresses every change in the package.
+
+
+def find_revisions(root: etree._Element, revision_id: int) -> list[etree._Element]:
+    """Every ``w:ins``/``w:del`` element carrying this ``w:id``."""
+    target = str(revision_id)
+    return [
+        element
+        for element in root.iter(q("ins"), q("del"))
+        if element.get(q("id")) == target
+    ]
+
+
+def _unwrap(element: etree._Element) -> None:
+    """Replace an element with its children, keeping document order."""
+    parent = element.getparent()
+    if parent is None:
+        return
+    position = list(parent).index(element)
+    for offset, child in enumerate(list(element)):
+        parent.insert(position + offset, child)
+    parent.remove(element)
+
+
+def _deleted_to_visible(run_container: etree._Element) -> None:
+    """Convert ``w:delText`` back to ``w:t`` so rejected text becomes visible again."""
+    for node in run_container.iter(q("delText")):
+        node.tag = q("t")
+
+
+def _set_run_text(container: etree._Element, text: str) -> None:
+    """Force a revision's runs to carry exactly ``text`` (used for reviewer edits)."""
+    nodes = list(container.iter(q("t")))
+    if not nodes:
+        return
+    nodes[0].text = text
+    nodes[0].set(f"{{{XML}}}space", "preserve")
+    for extra in nodes[1:]:
+        extra.text = ""
+
+
+def resolve_revision(
+    root: etree._Element,
+    revision_id: int,
+    *,
+    accept: bool,
+    replacement_text: str | None = None,
+) -> int:
+    """Accept or reject one revision, in place. Returns how many elements were resolved.
+
+    Accepting keeps the insertion's text and discards the deletion; rejecting does the
+    opposite. ``replacement_text`` overrides the inserted text, which is how a reviewer's
+    edited wording is applied instead of the proposed wording.
+    """
+    resolved = 0
+    for element in find_revisions(root, revision_id):
+        is_insertion = element.tag == q("ins")
+        if accept:
+            if is_insertion:
+                if replacement_text is not None:
+                    _set_run_text(element, replacement_text)
+                _unwrap(element)
+            else:
+                parent = element.getparent()
+                if parent is not None:
+                    parent.remove(element)
+        else:
+            if is_insertion:
+                parent = element.getparent()
+                if parent is not None:
+                    parent.remove(element)
+            else:
+                _deleted_to_visible(element)
+                _unwrap(element)
+        resolved += 1
+    return resolved
+
+
+def strip_comment_markers(root: etree._Element) -> int:
+    """Remove comment ranges and reference runs from a part.
+
+    The final document is the clean, as-approved text; review annotations do not belong
+    in it. Returns how many markers were removed.
+    """
+    removed = 0
+    for tag in ("commentRangeStart", "commentRangeEnd"):
+        for element in list(root.iter(q(tag))):
+            parent = element.getparent()
+            if parent is not None:
+                parent.remove(element)
+                removed += 1
+    for reference in list(root.iter(q("commentReference"))):
+        run = reference.getparent()
+        if run is not None and run.tag == q("r"):
+            parent = run.getparent()
+            if parent is not None:
+                parent.remove(run)
+                removed += 1
+    return removed
+
+
+def remaining_revisions(root: etree._Element) -> list[tuple[str, str | None, str | None]]:
+    """Unresolved revisions left in a part, as ``(kind, id, author)``."""
+    return [
+        (element.tag.split("}")[1], element.get(q("id")), element.get(q("author")))
+        for element in root.iter(q("ins"), q("del"))
+    ]

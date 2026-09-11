@@ -64,6 +64,7 @@ class AppliedChange:
     comment: str
     engine: str                       # docx-editor | raw-ooxml
     revision_id: int | None = None
+    revision_ids: list[int] = field(default_factory=list)
     comment_id: int | None = None
     group_id: int | None = None
 
@@ -76,6 +77,7 @@ class AppliedChange:
             "rule_id": self.rule_id,
             "engine": self.engine,
             "revision_id": self.revision_id,
+            "revision_ids": list(self.revision_ids),
             "comment_id": self.comment_id,
             "original_text": self.hit.matched_text,
             "proposed_text": self.hit.approved_text,
@@ -167,6 +169,7 @@ def _apply_body_hits(
                             comment=comments[id(hit)],
                             engine="docx-editor",
                             revision_id=result.revision_ids[0] if result.revision_ids else None,
+                            revision_ids=list(result.revision_ids),
                             comment_id=result.comment_id,
                             group_id=result.group_id,
                         )
@@ -337,6 +340,7 @@ def _apply_raw_hits(
                             comment=comments[id(hit)],
                             engine="raw-ooxml",
                             revision_id=used_revision,
+                            revision_ids=[used_revision, used_revision + 1],
                             comment_id=used_comment,
                         )
                     )
@@ -401,3 +405,155 @@ def redline(
         current = package.to_bytes()
 
     return RedlineResult(data=current, applied=applied, skipped=skipped)
+
+
+# ------------------------------------------------------- LLM edits and comments
+
+
+def minimal_diff(original: str, revised: str) -> tuple[int, int, str] | None:
+    """The smallest ``(start, end, replacement)`` turning ``original`` into ``revised``.
+
+    The judge returns a whole revised sentence, but only a small region of it may differ
+    (validated by :func:`termguard.judge.detect_over_edit`). Trimming the common prefix
+    and suffix recovers exactly that region, so an LLM change lands as one tracked
+    replacement - and a grammatical agreement the swap forced, like ``a`` -> ``an``, is
+    carried inside the same change rather than lost.
+
+    The region is snapped outward to word boundaries. Without that, "a side effect" ->
+    "an adverse event" trims to the unreadable pair (" side effec" -> "n adverse even"),
+    which is correct but shows up in Word's Review pane as gibberish. A reviewer has to
+    read these, so they must break on words.
+
+    Returns None when the strings are identical.
+    """
+    if original == revised:
+        return None
+
+    prefix = 0
+    limit = min(len(original), len(revised))
+    while prefix < limit and original[prefix] == revised[prefix]:
+        prefix += 1
+
+    suffix = 0
+    while (
+        suffix < limit - prefix
+        and original[len(original) - 1 - suffix] == revised[len(revised) - 1 - suffix]
+    ):
+        suffix += 1
+
+    start, end = prefix, len(original) - suffix
+    replacement = revised[prefix : len(revised) - suffix]
+    return _snap_to_words(original, start, end, replacement)
+
+
+def _is_word_char(text: str) -> bool:
+    return bool(text) and (text.isalnum() or text == "_")
+
+
+def _snap_to_words(
+    original: str, start: int, end: int, replacement: str
+) -> tuple[int, int, str]:
+    """Widen a diff region until neither edge falls inside a word."""
+    while (
+        start > 0
+        and _is_word_char(original[start - 1])
+        and (_is_word_char(replacement[:1]) or _is_word_char(original[start : start + 1]))
+    ):
+        start -= 1
+        replacement = original[start] + replacement
+
+    while (
+        end < len(original)
+        and _is_word_char(original[end])
+        and (_is_word_char(replacement[-1:]) or _is_word_char(original[end - 1 : end]))
+    ):
+        replacement += original[end]
+        end += 1
+
+    return start, end, replacement
+
+
+def hit_for_llm_edit(hit: Hit, revised_sentence: str) -> Hit | None:
+    """Re-express a judge's revised sentence as a hit against the paragraph.
+
+    Returns None when the revision changes nothing, or when the sentence cannot be
+    located in the paragraph (in which case the caller escalates rather than guessing).
+    """
+    sentence = hit.sentence or hit.paragraph_text
+    diff = minimal_diff(sentence, revised_sentence)
+    if diff is None:
+        return None
+
+    sentence_start = hit.paragraph_text.find(sentence)
+    if sentence_start < 0:
+        return None
+
+    start, end, replacement = diff
+    absolute = (sentence_start + start, sentence_start + end)
+    matched = hit.paragraph_text[absolute[0] : absolute[1]]
+
+    # Occurrence of this exact literal within the paragraph, so the writer anchors to the
+    # right one when the same text appears more than once.
+    occurrence = hit.paragraph_text.count(matched, 0, absolute[0]) if matched else 0
+
+    return Hit(
+        location=hit.location,
+        rule_id=hit.rule_id,
+        matched_text=matched,
+        approved_text=replacement,
+        span=absolute,
+        occurrence=occurrence,
+        sentence=sentence,
+        paragraph_text=hit.paragraph_text,
+        classification=hit.classification,
+        reason=hit.reason,
+    )
+
+
+def annotate(
+    data: bytes,
+    annotations: Sequence[tuple[Hit, str]],
+) -> tuple[bytes, list[AppliedChange], list[tuple[Hit, str]]]:
+    """Attach comments without changing any text.
+
+    Used for the judge's ``keep`` and ``escalate`` decisions: the reviewer must see that
+    the span was considered and why it was left alone, but nothing may be edited.
+    """
+    applied: list[AppliedChange] = []
+    skipped: list[tuple[Hit, str]] = []
+    body = [(h, text) for h, text in annotations if h.location.part in DOCX_EDITOR_PARTS]
+    other = [(h, text) for h, text in annotations if h.location.part not in DOCX_EDITOR_PARTS]
+
+    # Non-body parts carry their citation in the audit trail, matching the redline policy.
+    skipped.extend((h, "comment-only annotation not written outside the body") for h, _ in other)
+
+    if not body:
+        return data, applied, skipped
+
+    with TemporaryDirectory(prefix="termguard-annotate-") as tmp:
+        work = Path(tmp) / "work.docx"
+        work.write_bytes(data)
+        doc = de.Document.open(work, author="TermGuard (AI-proposed)", force_recreate=True)
+        try:
+            structured = {i: info.ref for i, info in enumerate(doc.list_paragraphs_structured())}
+            for hit, text in body:
+                ref = structured.get(hit.location.paragraph_index)
+                if ref is None:
+                    skipped.append((hit, "paragraph not found by docx-editor"))
+                    continue
+                try:
+                    comment_id = doc.add_comment(
+                        hit.matched_text, text, paragraph=ref, occurrence=hit.occurrence
+                    )
+                    applied.append(
+                        AppliedChange(hit=hit, comment=text, engine="docx-editor",
+                                      comment_id=comment_id)
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    skipped.append((hit, f"{type(exc).__name__}: {exc}"))
+            doc.save(work, force=True)
+        finally:
+            doc.close()
+        data = work.read_bytes()
+
+    return data, applied, skipped

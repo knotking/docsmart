@@ -229,8 +229,10 @@ class Change(SQLModel, table=True):
     justification: Optional[str] = Field(default=None, sa_column=Column(Text))
     llm_decision: Optional[str] = Field(default=None, description="change|keep|escalate")
 
-    # anchor back into the .docx
+    # anchor back into the .docx. revision_ids holds every w:id this change wrote
+    # (the w:del and its paired w:ins), which is what verify.py resolves against.
     revision_id: Optional[int] = None
+    revision_ids: list[int] = Field(default_factory=list, sa_column=Column(JSON))
     comment_id: Optional[int] = None
 
     applied_at: Optional[datetime] = None

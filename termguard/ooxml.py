@@ -179,3 +179,183 @@ def section_index(paragraph: etree._Element, root: etree._Element) -> int:
         if ppr is not None and ppr.find(q("sectPr")) is not None:
             index += 1
     return index
+
+
+# --------------------------------------------------------------- tracked changes
+#
+# Everything below writes revision markup into parts that ``docx-editor`` does not reach
+# (headers, footers, footnotes, endnotes, text boxes). The output has to be markup Word
+# accepts without a repair prompt, so it follows the same shape Word itself produces:
+# a ``w:del`` whose runs carry ``w:delText``, and a sibling ``w:ins`` carrying the
+# replacement, both stamped with an author and an ISO-8601 date.
+
+from copy import deepcopy  # noqa: E402
+from datetime import datetime, timezone  # noqa: E402
+
+DELETABLE_ATTRS = (q("id"), q("author"), q("date"))
+
+
+def iso_timestamp(moment: datetime | None = None) -> str:
+    """Revision timestamp in the form Word writes: UTC, second precision, trailing Z."""
+    moment = moment or datetime.now(timezone.utc)
+    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _clone_run_shell(run: etree._Element) -> etree._Element:
+    """A copy of a run carrying its formatting (``w:rPr``) but no content.
+
+    Preserving ``w:rPr`` is what keeps bold, italics and character styles intact across a
+    replacement - constraint 1 says we may not quietly restyle a document either.
+    """
+    new_run = etree.Element(q("r"))
+    rpr = run.find(q("rPr"))
+    if rpr is not None:
+        new_run.append(deepcopy(rpr))
+    return new_run
+
+
+def _text_run(template: etree._Element, text: str, *, deleted: bool = False) -> etree._Element:
+    """A run carrying ``text``, formatted like ``template``."""
+    run = _clone_run_shell(template)
+    node = etree.SubElement(run, q("delText") if deleted else q("t"))
+    node.text = text
+    node.set(f"{{{XML}}}space", "preserve")
+    return run
+
+
+def _revision_wrapper(tag: str, rev_id: int, author: str, date: str) -> etree._Element:
+    element = etree.Element(q(tag))
+    element.set(q("id"), str(rev_id))
+    element.set(q("author"), author)
+    element.set(q("date"), date)
+    return element
+
+
+def apply_tracked_replacement(
+    paragraph: etree._Element,
+    run_map: list[tuple[etree._Element, int, int]],
+    start: int,
+    end: int,
+    replacement: str,
+    *,
+    author: str,
+    date: str,
+    del_id: int,
+    ins_id: int,
+) -> tuple[etree._Element, etree._Element]:
+    """Replace ``[start, end)`` with ``replacement`` as a tracked change.
+
+    Handles a span split across several runs: each affected run is cut into the part
+    before the span, the deleted part, and the part after. The replacement is inserted
+    once, at the position of the first affected run, so the reader sees one clean
+    "was X, now Y" pair rather than one per run boundary.
+
+    Returns the ``(w:del, w:ins)`` elements written.
+    """
+    affected = nodes_for_span(run_map, start, end)
+    if not affected:
+        raise ValueError(f"span [{start}, {end}) does not resolve to any run")
+
+    del_element = _revision_wrapper("del", del_id, author, date)
+    ins_element = _revision_wrapper("ins", ins_id, author, date)
+
+    first_run: etree._Element | None = None
+    anchor_parent: etree._Element | None = None
+    anchor_position: int | None = None
+
+    for node, local_start, local_end in affected:
+        run = node.getparent()
+        if run is None or run.tag != q("r"):
+            raise ValueError("text node is not inside a run")
+        parent = run.getparent()
+        if parent is None:
+            raise ValueError("run is not attached to a paragraph")
+
+        text = node.text or ""
+        before, middle, after = text[:local_start], text[local_start:local_end], text[local_end:]
+        position = list(parent).index(run)
+
+        if first_run is None:
+            first_run = run
+            anchor_parent = parent
+            anchor_position = position
+
+        replacements: list[etree._Element] = []
+        if before:
+            replacements.append(_text_run(run, before))
+        del_element.append(_text_run(run, middle, deleted=True))
+        if after:
+            replacements.append(_text_run(run, after))
+
+        parent.remove(run)
+        for offset, new_run in enumerate(replacements):
+            parent.insert(position + offset, new_run)
+        # Record where the revision pair goes: immediately after the "before" fragment.
+        if run is first_run:
+            anchor_position = position + (1 if before else 0)
+
+    assert anchor_parent is not None and anchor_position is not None
+    ins_element.append(_text_run(first_run, replacement))  # type: ignore[arg-type]
+    anchor_parent.insert(anchor_position, ins_element)
+    anchor_parent.insert(anchor_position, del_element)
+    return del_element, ins_element
+
+
+def add_comment_range(
+    paragraph: etree._Element,
+    anchor: etree._Element,
+    comment_id: int,
+) -> None:
+    """Wrap ``anchor`` in a comment range and append the reference run.
+
+    ``anchor`` is normally the ``w:ins`` element written by
+    :func:`apply_tracked_replacement`, so the comment points at the change itself.
+    """
+    parent = anchor.getparent()
+    if parent is None:  # pragma: no cover - defensive
+        return
+    position = list(parent).index(anchor)
+
+    start = etree.Element(q("commentRangeStart"))
+    start.set(q("id"), str(comment_id))
+    end = etree.Element(q("commentRangeEnd"))
+    end.set(q("id"), str(comment_id))
+
+    reference_run = etree.Element(q("r"))
+    rpr = etree.SubElement(reference_run, q("rPr"))
+    style = etree.SubElement(rpr, q("rStyle"))
+    style.set(q("val"), "CommentReference")
+    reference = etree.SubElement(reference_run, q("commentReference"))
+    reference.set(q("id"), str(comment_id))
+
+    parent.insert(position, start)
+    parent.insert(position + 2, end)          # after the anchor
+    parent.insert(position + 3, reference_run)
+
+
+def build_comment_element(
+    comment_id: int, author: str, initials: str, date: str, text: str
+) -> etree._Element:
+    """A ``w:comment`` element for comments.xml."""
+    comment = etree.Element(q("comment"))
+    comment.set(q("id"), str(comment_id))
+    comment.set(q("author"), author)
+    comment.set(q("initials"), initials)
+    comment.set(q("date"), date)
+
+    paragraph = etree.SubElement(comment, q("p"))
+    ppr = etree.SubElement(paragraph, q("pPr"))
+    pstyle = etree.SubElement(ppr, q("pStyle"))
+    pstyle.set(q("val"), "CommentText")
+
+    annotation_run = etree.SubElement(paragraph, q("r"))
+    rpr = etree.SubElement(annotation_run, q("rPr"))
+    rstyle = etree.SubElement(rpr, q("rStyle"))
+    rstyle.set(q("val"), "CommentReference")
+    etree.SubElement(annotation_run, q("annotationRef"))
+
+    text_run = etree.SubElement(paragraph, q("r"))
+    node = etree.SubElement(text_run, q("t"))
+    node.text = text
+    node.set(f"{{{XML}}}space", "preserve")
+    return comment

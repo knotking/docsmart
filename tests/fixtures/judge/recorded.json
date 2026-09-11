@@ -1,0 +1,21 @@
+{
+  "_comment": "Recorded judge responses keyed by 'rule|matched' or 'rule|matched|sentence'. Used so tests and dry runs never call the API. Keys are casefolded.",
+
+  "R-002|side effect|tell your care team about any side effect you notice.": {
+    "decision": "keep",
+    "revised_sentence": "Tell your care team about any side effect you notice.",
+    "justification": "The sentence addresses the patient directly, so the readability-tested plain-language term is correct here."
+  },
+
+  "R-002|side effect|investigators recorded each side effect observed during the study period.": {
+    "decision": "change",
+    "revised_sentence": "Investigators recorded each adverse event observed during the study period.",
+    "justification": "This is a clinical evaluation context where the regulatory term is required."
+  },
+
+  "R-010|nurse|the nurse practitioner reviews the order.": {
+    "decision": "keep",
+    "revised_sentence": "The nurse practitioner reviews the order.",
+    "justification": "The text names a specific nursing credential rather than a general clinician task."
+  }
+}

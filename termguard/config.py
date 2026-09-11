@@ -51,9 +51,10 @@ class Settings:
     rulebook_path: Path = field(default_factory=lambda: REPO_ROOT / "data" / "rulebook.yaml")
 
     # --- LLM ---------------------------------------------------------------
-    anthropic_model: str = "claude-sonnet-5"
+    anthropic_model: str = "claude-opus-5"
     llm_live: bool = False
-    llm_max_tokens: int = 1024
+    llm_max_tokens: int = 4096
+    llm_effort: str = "low"
     fixture_dir: Path = field(default_factory=lambda: REPO_ROOT / "tests" / "fixtures" / "judge")
 
     # --- identity ----------------------------------------------------------
@@ -84,6 +85,6 @@ def get_settings() -> Settings:
         corpus_dir=Path(_env("TERMGUARD_CORPUS_DIR", str(REPO_ROOT / "data" / "corpus"))),
         out_dir=Path(_env("TERMGUARD_OUT_DIR", str(REPO_ROOT / "data" / "out"))),
         rulebook_path=Path(_env("TERMGUARD_RULEBOOK", str(REPO_ROOT / "data" / "rulebook.yaml"))),
-        anthropic_model=_env("ANTHROPIC_MODEL", "claude-sonnet-5"),
+        anthropic_model=_env("ANTHROPIC_MODEL", "claude-opus-5"),
         llm_live=_flag("TERMGUARD_LLM_LIVE", False),
     )

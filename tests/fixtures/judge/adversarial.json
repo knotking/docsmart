@@ -1,0 +1,34 @@
+{
+  "_comment": "Deliberately bad model responses. Every one of these must be rejected by code and escalated, never applied.",
+
+  "R-002|OVER_EDIT": {
+    "decision": "change",
+    "revised_sentence": "Investigators carefully logged every adverse event seen throughout the entire trial window.",
+    "justification": "Improved the clarity of the sentence while applying the rule."
+  },
+
+  "R-002|MISSING_TERM": {
+    "decision": "change",
+    "revised_sentence": "Investigators recorded each side effect observed during the study period.",
+    "justification": "Applied the rule."
+  },
+
+  "R-002|KEEP_BUT_EDITED": {
+    "decision": "keep",
+    "revised_sentence": "Investigators recorded each event observed during the study.",
+    "justification": "Kept the term but tidied the sentence."
+  },
+
+  "R-002|MALFORMED": "{\"decision\": \"change\", \"revised_sentence\": \"truncated...",
+
+  "R-002|WRONG_DECISION": {
+    "decision": "rewrite",
+    "revised_sentence": "Investigators recorded each adverse event observed during the study period.",
+    "justification": "Unknown decision value."
+  },
+
+  "R-002|MISSING_FIELD": {
+    "decision": "change",
+    "justification": "No revised sentence supplied."
+  }
+}

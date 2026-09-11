@@ -1,0 +1,181 @@
+# TermGuard terminology rulebook - Meridian Medical (fictional)
+#
+# Semantics reminder:
+#   exceptions        regexes matched against the sentence; a match that COVERS the hit
+#                     span suppresses the hit entirely (quoted citations, historical refs)
+#   context_required  a match is never auto-changed; it goes to the reviewer/LLM queue
+#   case: preserve    replacement is re-cased to match the text it replaces
+version: "1"
+
+rules:
+  - id: R-001
+    deprecated: ["Meridian Pump 2", "Meridian Pump II", "MP-2 pump"]
+    approved: "Meridian Infusion System"
+    match: phrase
+    case: preserve
+    scope: [body, headings, tables, headers_footers, footnotes]
+    exceptions:
+      - "formerly (known as )?(the )?Meridian Pump 2"
+      - "previously marketed as [^.]*"
+      - "\\(legacy: [^)]*\\)"
+    rationale: >-
+      The device was renamed at the 2024 510(k) clearance. Documents carrying the old
+      trade name cannot be issued to customers, but historical references to the prior
+      name are required for traceability and must survive.
+    owner: regulatory-affairs
+    effective_date: 2024-03-01
+
+  - id: R-002
+    deprecated: ["side effect", "side effects"]
+    approved: "adverse event"
+    match: phrase
+    case: preserve
+    scope: [body, headings, tables, headers_footers, footnotes]
+    context_required: true
+    context_note: >-
+      "Adverse event" is the regulatory term and is required in clinical and risk
+      documents. In patient-facing plain-language sections, "side effect" is the
+      readability-tested wording and must be left alone. Judge by the section: if the
+      surrounding text addresses the patient directly ("you may experience"), keep it.
+    rationale: >-
+      MDR reportability language must be unambiguous, but plain-language labelling is
+      held to a separate readability standard.
+    owner: clinical-affairs
+    effective_date: 2023-09-15
+
+  - id: R-003
+    deprecated: ["IFU"]
+    approved: "Instructions for Use"
+    match: whole_word
+    case: exact
+    scope: [body, headings, tables, footnotes]
+    exceptions:
+      - "IFU-\\d+"
+      - "\\(IFU\\)"
+      - "document (number|no\\.?) [A-Z-]*IFU[A-Z0-9-]*"
+    context_required: true
+    context_note: >-
+      Expand on first use in a document; the abbreviation is acceptable thereafter, and
+      inside document numbers (IFU-004) or an established parenthetical gloss it must not
+      be touched.
+    rationale: "Abbreviations must be defined at first use in labelling."
+    owner: technical-writing
+    effective_date: 2023-01-10
+
+  - id: R-004
+    deprecated: ["physician", "physicians"]
+    approved: "healthcare provider"
+    match: whole_word
+    case: preserve
+    scope: [body, headings, tables, headers_footers, footnotes]
+    exceptions:
+      - "“[^”]*physician[^”]*”"
+      - "\"[^\"]*physician[^\"]*\""
+      - "21 CFR [^.]*physician[^.]*"
+      - "per 21 CFR [^.]*"
+    rationale: >-
+      The device is prescribed and managed by a range of licensed providers, not only
+      physicians. Quoted regulatory text is reproduced verbatim by law and is exempt.
+    owner: regulatory-affairs
+    effective_date: 2024-01-01
+
+  - id: R-005
+    deprecated: ["shall"]
+    approved: "must"
+    match: whole_word
+    case: preserve
+    scope: [body, tables, footnotes]
+    exceptions:
+      - "\"[^\"]*shall[^\"]*\""
+      - "21 CFR [^.]*shall[^.]*"
+    rationale: >-
+      ISO/IEC directives and FDA plain-language guidance both prefer "must" for
+      requirements; "shall" is ambiguous between obligation and futurity.
+    owner: quality-assurance
+    effective_date: 2023-06-01
+
+  - id: R-006
+    deprecated: ["labelling", "labelled"]
+    approved: "labeling"
+    match: whole_word
+    case: preserve
+    scope: [body, headings, tables, headers_footers, footnotes]
+    rationale: "US spelling is required throughout the FDA submission set."
+    owner: technical-writing
+    effective_date: 2023-01-10
+
+  - id: R-007
+    deprecated: ["ml"]
+    approved: "mL"
+    match: whole_word
+    case: exact
+    scope: [body, headings, tables, headers_footers, footnotes]
+    rationale: >-
+      SI style: the litre symbol is capitalized to avoid confusion between the numeral 1
+      and lowercase l in printed labelling.
+    owner: quality-assurance
+    effective_date: 2023-01-10
+
+  - id: R-008
+    deprecated: ["single use"]
+    approved: "single-use"
+    match: phrase
+    case: preserve
+    scope: [body, headings, tables, headers_footers, footnotes]
+    rationale: "Compound modifier is hyphenated per the house style guide."
+    owner: technical-writing
+    effective_date: 2023-01-10
+
+  - id: R-009
+    deprecated: ["infusion set", "infusion sets"]
+    approved: "administration set"
+    match: phrase
+    case: preserve
+    scope: [body, headings, tables, footnotes]
+    rationale: >-
+      "Administration set" matches the accessory naming used in the cleared device
+      listing; "infusion set" is a colloquialism inherited from marketing copy.
+    owner: regulatory-affairs
+    effective_date: 2024-03-01
+
+  - id: R-010
+    deprecated: ["nurse", "nurses"]
+    approved: "clinician"
+    match: whole_word
+    case: preserve
+    scope: [body, tables, footnotes]
+    exceptions:
+      - "\"[^\"]*nurse[^\"]*\""
+      - "nurse practitioner"
+    context_required: true
+    context_note: >-
+      Where the text describes a task any trained clinician performs, generalize. Where
+      it names a specific nursing role or credential (nurse practitioner, charge nurse),
+      keep it.
+    rationale: "Role references must match the trained-user population in the IFU."
+    owner: clinical-affairs
+    effective_date: 2024-01-01
+
+  - id: R-011
+    deprecated: ["error message", "error messages"]
+    approved: "alarm condition"
+    match: phrase
+    case: preserve
+    scope: [body, headings, tables, footnotes]
+    rationale: >-
+      IEC 60601-1-8 defines alarm conditions; "error message" has no standard meaning and
+      cannot be cross-referenced to the alarm table.
+    owner: systems-engineering
+    effective_date: 2023-11-01
+
+  - id: R-012
+    deprecated: ["drug library", "drug libraries"]
+    approved: "medication library"
+    match: phrase
+    case: preserve
+    scope: [body, headings, tables, headers_footers, footnotes]
+    rationale: >-
+      "Medication library" is the term used in the user interface and the training
+      materials; documentation must match what the user sees on screen.
+    owner: systems-engineering
+    effective_date: 2024-03-01

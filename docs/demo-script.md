@@ -1,6 +1,6 @@
 # TermGuard demo script
 
-Ten minutes, one Word-opening moment in the middle. Written so anyone on the team can
+Eleven minutes, one Word-opening moment in the middle. Written so anyone on the team can
 give it without having seen the code.
 
 **Before you start**
@@ -19,7 +19,32 @@ screen — never the ones in this document.
 
 ---
 
-## 0:00 — The problem, in one sentence
+## 0:00 — Where things stand (60 seconds)
+
+Open **`/metrics`** — the landing screen.
+
+> "Before the demo proper: this is what someone opening the tool sees. Documents under
+> management, how many are verified clean, what is waiting on a decision. And the two
+> numbers that decide whether this stays switched on."
+
+Point at **"How much a machine decided"**.
+
+> "A third of the decisions on the last run were made by an agent, not a person — and
+> every one of them names the policy clause that authorized it. None are unattributed;
+> if any were, that box would be red, because a machine decision with no authority behind
+> it is a defect in the control, not a statistic."
+
+Then **"Trust in the model's proposals"**.
+
+> "And this is the honest measure of the AI. Not its confidence — what reviewers actually
+> did with its suggestions. If that override rate climbs, a rule's context note is wrong,
+> and we find out here rather than in an audit."
+
+Then move to the story.
+
+---
+
+## 1:00 — The problem, in one sentence
 
 > "A regulated document set has to use the same words everywhere. When a device is
 > renamed, or a term changes meaning to a regulator, someone has to find every occurrence
@@ -44,7 +69,7 @@ Point at **R-002**, `side effect → adverse event`, context flag on.
 
 ---
 
-## 1:30 — Start a run
+## 2:15 — Start a run
 
 Go to **`/run`**, click **Start run**, narrate the progress log as it scrolls.
 
@@ -72,7 +97,7 @@ Now the **hits by part** chart.
 
 ---
 
-## 4:00 — Open it in Word
+## 4:15 — Open it in Word
 
 Download **`RMS-001.redlined.docx`** from the file list — or open
 `data/out/redlined/RMS-001.redlined.docx` directly. This one file carries every kind of
@@ -117,7 +142,25 @@ And, in the same file, the Regulatory Note paragraph with the quoted CFR text:
 
 ---
 
-## 6:30 — The reviewer queue
+## 6:45 — Who is doing the work
+
+Open **`/workflow`** briefly.
+
+> "Several people work a run together, and one of the participants is an agent. The policy
+> table is the important thing here: it says exactly what the agent may decide on its own
+> — spelling, unit style, hyphenation — and the rationale for each grant. The three
+> context-dependent rules are deliberately absent. The agent may *propose* on those; it
+> may never dispose of them."
+
+Scroll to **Sign-off**.
+
+> "And this is the two-person rule. Dana can approve this run. Alice cannot — she reviewed
+> ninety-five changes in it. The tool tells you *why* rather than hiding the button,
+> because a control you can't see is one people assume is broken."
+
+---
+
+## 7:15 — The reviewer queue
 
 Back to the dashboard, **`/review`**.
 
@@ -145,7 +188,7 @@ Then click **Edit** on another, change the wording, and save.
 
 ---
 
-## 8:30 — Verify
+## 8:45 — Verify
 
 Go to **`/verify`**, click **Run verification**.
 
@@ -185,7 +228,7 @@ It fails: `SOP-001.docx: 1 unexplained edit(s)`.
 
 ---
 
-## 9:30 — The audit trail
+## 10:00 — The audit trail
 
 Click **Download audit CSV**. Open it.
 
@@ -240,6 +283,9 @@ Two different answers, because they are two different systems:
 - **The AI step is validated by containment and by human review**, not by output accuracy,
   because output accuracy is not something either of us can certify. The tests assert that
   bad model output is *rejected*, not that good model output is produced.
+- **And it is measured in production.** The metrics screen tracks what reviewers did with
+  the model's proposals, per rule. That is the number to watch: if reviewers start
+  overruling a rule, you find out from the dashboard rather than from an audit finding.
 
 > "Which is the honest split: the part that can be proven correct, we prove. The part that
 > cannot, we contain and put a human in front of."

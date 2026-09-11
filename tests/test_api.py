@@ -29,6 +29,10 @@ def api(tmp_path: Path, corpus_dir: Path, monkeypatch):
 
     rulebook = tmp_path / "rulebook.yaml"
     shutil.copy(REPO_ROOT / "data" / "rulebook.yaml", rulebook)
+    # The agent-authority policy is resolved next to the rulebook, so it has to travel
+    # with it - without it the policy loads empty and delegates nothing, which is the
+    # safe default but not what these tests are exercising.
+    shutil.copy(REPO_ROOT / "data" / "policy.yaml", tmp_path / "policy.yaml")
 
     monkeypatch.setenv("TERMGUARD_DB_URL", f"sqlite:///{tmp_path / 'api.db'}")
     monkeypatch.setenv("TERMGUARD_BLOB_ROOT", str(tmp_path / "blobs"))
@@ -358,3 +362,253 @@ class TestRulebookEndpoint:
         rules = body["rules"]
         rules[1]["deprecated"] = rules[0]["deprecated"]
         assert api.put("/rulebook", json={"rules": rules}).status_code == 400
+
+
+class TestMetricsEndpoint:
+    def test_dashboard_returns_every_section(self, api: TestClient, completed: int) -> None:
+        body = api.get("/metrics").json()
+        assert {"posture", "ai_trust", "throughput", "rule_health", "attention"} <= set(body)
+        assert body["run_id"] == completed
+
+    def test_posture_counts_documents_and_versions(self, api: TestClient, completed: int) -> None:
+        posture = api.get("/metrics").json()["posture"]
+        assert posture["documents"] == len(SUBSET)
+        assert posture["versions"] >= len(SUBSET)
+        assert posture["changes"]["pending"] == posture["changes"]["total"]
+
+    def test_attention_flags_pending_decisions(self, api: TestClient, completed: int) -> None:
+        titles = " ".join(i["title"] for i in api.get("/metrics").json()["attention"])
+        assert "awaiting a decision" in titles
+
+    def test_rule_health_is_sorted_worst_first(self, api: TestClient, completed: int) -> None:
+        rules = api.get("/metrics/rules").json()
+        assert rules
+        rates = [r["override_rate"] or 0 for r in rules]
+        assert rates == sorted(rates, reverse=True)
+
+    def test_acceptance_rate_is_none_before_any_verdict(self, api, completed: int) -> None:
+        """No data and zero percent are different facts."""
+        assert api.get("/metrics").json()["ai_trust"]["acceptance_rate"] is None
+
+    def test_override_rate_reflects_a_rejection(self, api: TestClient, completed: int) -> None:
+        ai_items = api.get(f"/runs/{completed}/queue", params={"mechanism": "ai"}).json()["items"]
+        api.post(f"/changes/{ai_items[0]['change_id']}/decision",
+                 json={"decision": "rejected", "reviewer": "qa@meridian"})
+        api.post(f"/changes/{ai_items[1]['change_id']}/decision",
+                 json={"decision": "accepted", "reviewer": "qa@meridian"})
+
+        trust = api.get("/metrics").json()["ai_trust"]
+        assert trust["judged_by_humans"] == 2
+        assert trust["acceptance_rate"] == 0.5
+
+
+class TestPolicyEndpoint:
+    def test_policy_reports_clauses_and_hash(self, api: TestClient) -> None:
+        body = api.get("/policy").json()
+        assert len(body["hash"]) == 16
+        assert body["clauses"]
+        assert body["default"] == "human decides"
+
+    def test_every_clause_explains_itself(self, api: TestClient) -> None:
+        assert all(c["rationale"].strip() for c in api.get("/policy").json()["clauses"])
+
+    def test_judgment_rules_are_not_delegated(self, api: TestClient) -> None:
+        delegated = set(api.get("/policy").json()["rules_agents_may_decide"])
+        assert not ({"R-002", "R-003", "R-010"} & delegated)
+
+    def test_a_missing_policy_file_is_reported_as_missing(
+        self, api: TestClient, tmp_path: Path
+    ) -> None:
+        """An absent policy and a policy granting nothing both delegate zero authority,
+        but only one of them is a configuration mistake."""
+        present = api.get("/policy").json()
+        assert present["present"] is True
+
+        (tmp_path / "policy.yaml").unlink()
+        absent = api.get("/policy").json()
+        assert absent["present"] is False
+        assert absent["clauses"] == []
+        assert absent["default"] == "human decides"
+
+
+class TestParticipantsEndpoint:
+    def test_create_and_list(self, api: TestClient) -> None:
+        created = api.post("/participants", json={"name": "alice@x", "roles": ["reviewer"]})
+        assert created.status_code == 201
+
+        people = api.get("/participants").json()
+        assert [p["name"] for p in people] == ["alice@x"]
+        assert people[0]["kind"] == "human"
+
+    def test_an_agent_records_its_model(self, api: TestClient) -> None:
+        api.post("/participants", json={"name": "bot-1", "kind": "agent",
+                                        "roles": ["reviewer"], "model": "claude-opus-5"})
+        agent = next(p for p in api.get("/participants").json() if p["name"] == "bot-1")
+        assert agent["kind"] == "agent" and agent["model"] == "claude-opus-5"
+
+    def test_creation_is_idempotent(self, api: TestClient) -> None:
+        api.post("/participants", json={"name": "dup@x", "roles": ["reviewer"]})
+        api.post("/participants", json={"name": "dup@x", "roles": ["approver"]})
+        people = [p for p in api.get("/participants").json() if p["name"] == "dup@x"]
+        assert len(people) == 1
+        assert set(people[0]["roles"]) == {"reviewer", "approver"}
+
+
+class TestClaimsEndpoint:
+    def _people(self, api: TestClient) -> None:
+        for name in ("alice@x", "bob@x"):
+            api.post("/participants", json={"name": name, "roles": ["reviewer"]})
+
+    def test_a_second_claim_conflicts(self, api: TestClient, completed: int) -> None:
+        self._people(api)
+        change_id = api.get(f"/runs/{completed}/queue").json()["items"][0]["change_id"]
+
+        first = api.post(f"/changes/{change_id}/claim", json={"participant": "alice@x"})
+        assert first.status_code == 200 and first.json()["expires_at"]
+
+        second = api.post(f"/changes/{change_id}/claim", json={"participant": "bob@x"})
+        assert second.status_code == 409
+        assert "alice@x" in second.json()["detail"]
+
+    def test_a_claim_blocks_another_reviewers_decision(self, api, completed: int) -> None:
+        self._people(api)
+        change_id = api.get(f"/runs/{completed}/queue").json()["items"][0]["change_id"]
+        api.post(f"/changes/{change_id}/claim", json={"participant": "alice@x"})
+
+        blocked = api.post(f"/changes/{change_id}/decision",
+                           json={"decision": "accepted", "reviewer": "bob@x"})
+        assert blocked.status_code == 409
+
+    def test_releasing_frees_the_change(self, api: TestClient, completed: int) -> None:
+        self._people(api)
+        change_id = api.get(f"/runs/{completed}/queue").json()["items"][0]["change_id"]
+        api.post(f"/changes/{change_id}/claim", json={"participant": "alice@x"})
+        released = api.delete(f"/changes/{change_id}/claim", params={"participant": "alice@x"})
+        assert released.json()["released"] is True
+        assert api.post(f"/changes/{change_id}/claim",
+                        json={"participant": "bob@x"}).status_code == 200
+
+    def test_the_queue_shows_who_holds_a_change(self, api: TestClient, completed: int) -> None:
+        self._people(api)
+        change_id = api.get(f"/runs/{completed}/queue").json()["items"][0]["change_id"]
+        api.post(f"/changes/{change_id}/claim", json={"participant": "alice@x"})
+
+        item = next(i for i in api.get(f"/runs/{completed}/queue").json()["items"]
+                    if i["change_id"] == change_id)
+        assert item["claimed_by"] == "alice@x"
+        assert item["claim_expires_at"]
+
+    def test_an_unknown_participant_is_rejected(self, api: TestClient, completed: int) -> None:
+        change_id = api.get(f"/runs/{completed}/queue").json()["items"][0]["change_id"]
+        response = api.post(f"/changes/{change_id}/claim", json={"participant": "ghost"})
+        assert response.status_code == 400
+
+
+class TestAgentEndpoints:
+    def test_dry_run_previews_without_deciding(self, api: TestClient, completed: int) -> None:
+        before = api.get(f"/runs/{completed}/queue").json()["total"]
+        preview = api.post(f"/runs/{completed}/agent-dispose", json={"dry_run": True}).json()
+        assert preview["decided"] > 0
+        assert preview["left_to_humans"] > 0
+        assert api.get(f"/runs/{completed}/queue").json()["total"] == before
+
+    def test_agent_decisions_name_their_clause(self, api: TestClient, completed: int) -> None:
+        result = api.post(f"/runs/{completed}/agent-dispose", json={}).json()
+        assert result["by_clause"]
+        assert result["policy_hash"]
+
+        trust = api.get("/metrics").json()["ai_trust"]["agent_decided"]
+        assert trust["count"] == result["decided"]
+        assert trust["unattributed"] == 0
+
+    def test_confirmation_clears_the_blocker(self, api: TestClient, completed: int) -> None:
+        api.post("/participants", json={"name": "alice@x", "roles": ["reviewer"]})
+        api.post(f"/runs/{completed}/agent-dispose", json={})
+
+        readiness = api.get(f"/runs/{completed}/signoff").json()
+        assert readiness["unconfirmed_agent_decisions"] > 0
+
+        confirmed = api.post(f"/runs/{completed}/confirm-agent-batch",
+                             json={"participant": "alice@x"}).json()
+        assert confirmed["confirmed"] > 0
+        assert api.get(f"/runs/{completed}/signoff").json()["unconfirmed_agent_decisions"] == 0
+
+
+class TestAssignmentEndpoint:
+    def test_work_is_spread_across_reviewers(self, api: TestClient, completed: int) -> None:
+        for name in ("alice@x", "bob@x"):
+            api.post("/participants", json={"name": name, "roles": ["reviewer"]})
+
+        result = api.post(f"/runs/{completed}/assign",
+                          json={"participants": ["alice@x", "bob@x"], "strategy": "by_file"}).json()
+        assert len(result["assigned"]) == 2
+        assert all(count > 0 for count in result["assigned"].values())
+
+        item = api.get(f"/runs/{completed}/queue").json()["items"][0]
+        assert item["assigned_to"] in {"alice@x", "bob@x"}
+
+    def test_an_unknown_strategy_is_rejected(self, api: TestClient, completed: int) -> None:
+        api.post("/participants", json={"name": "alice@x", "roles": ["reviewer"]})
+        response = api.post(f"/runs/{completed}/assign",
+                            json={"participants": ["alice@x"], "strategy": "vibes"})
+        assert response.status_code == 400
+
+
+class TestSignOffEndpoint:
+    def _clear_and_verify(self, api: TestClient, run_id: int, reviewer: str) -> None:
+        while True:
+            items = api.get(f"/runs/{run_id}/queue").json()["items"]
+            if not items:
+                break
+            for item in items:
+                api.post(f"/changes/{item['change_id']}/decision",
+                         json={"decision": "accepted", "reviewer": reviewer})
+        api.post(f"/runs/{run_id}/verify")
+
+    def test_readiness_lists_blockers(self, api: TestClient, completed: int) -> None:
+        body = api.get(f"/runs/{completed}/signoff").json()
+        assert body["ready"] is False
+        assert body["undecided"] > 0
+
+    def test_an_agent_can_never_sign_off(self, api: TestClient, completed: int) -> None:
+        api.post("/participants", json={"name": "bot-1", "kind": "agent",
+                                        "roles": ["reviewer", "approver"]})
+        response = api.post(f"/runs/{completed}/signoff",
+                            json={"participant": "bot-1", "decision": "approved"})
+        assert response.status_code == 409
+        assert "agent cannot sign off" in response.json()["detail"]
+
+    def test_a_reviewer_of_the_run_cannot_approve_it(self, api: TestClient, completed: int) -> None:
+        api.post("/participants", json={"name": "alice@x", "roles": ["reviewer", "approver"]})
+        self._clear_and_verify(api, completed, "alice@x")
+
+        response = api.post(f"/runs/{completed}/signoff",
+                            json={"participant": "alice@x", "decision": "approved"})
+        assert response.status_code == 409
+        assert "maker-checker" in response.json()["detail"]
+
+    def test_an_uninvolved_approver_can_sign(self, api: TestClient, completed: int) -> None:
+        api.post("/participants", json={"name": "alice@x", "roles": ["reviewer"]})
+        api.post("/participants", json={"name": "dana@x", "roles": ["approver"]})
+        self._clear_and_verify(api, completed, "alice@x")
+
+        readiness = api.get(f"/runs/{completed}/signoff").json()
+        assert readiness["ready"] is True
+        assert readiness["eligible_approvers"] == ["dana@x"]
+
+        body = api.post(f"/runs/{completed}/signoff",
+                        json={"participant": "dana@x", "decision": "approved",
+                              "note": "reviewed"}).json()
+        assert body["decision"] == "approved"
+        assert body["rulebook_hash"] and body["policy_hash"]
+        assert body["covered"]["decisions"] > 0
+
+    def test_a_signed_run_appears_in_readiness(self, api: TestClient, completed: int) -> None:
+        api.post("/participants", json={"name": "alice@x", "roles": ["reviewer"]})
+        api.post("/participants", json={"name": "dana@x", "roles": ["approver"]})
+        self._clear_and_verify(api, completed, "alice@x")
+        api.post(f"/runs/{completed}/signoff",
+                 json={"participant": "dana@x", "decision": "approved"})
+
+        signed = api.get(f"/runs/{completed}/signoff").json()["signed"]
+        assert len(signed) == 1 and signed[0]["participant"] == "dana@x"

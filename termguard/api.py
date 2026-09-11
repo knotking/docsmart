@@ -736,10 +736,18 @@ def metrics_rules(
 
 @app.get("/policy")
 def read_policy() -> dict[str, Any]:
-    """The agent-authority policy: what a machine is permitted to decide, and why."""
-    loaded = load_policy(_policy_path())
+    """The agent-authority policy: what a machine is permitted to decide, and why.
+
+    ``present`` distinguishes "no policy file" from "a policy that deliberately grants
+    nothing". Both delegate zero authority, which is the safe default either way, but
+    only one of them is a configuration mistake.
+    """
+    path = _policy_path()
+    loaded = load_policy(path)
     return {
         **loaded.summary(),
+        "present": path.exists(),
+        "path": str(path),
         "default_risk": loaded.default_risk.value,
         "risk_by_rule": {k: v.value for k, v in loaded.risk_by_rule.items()},
         "clauses": [c.model_dump(mode="json") for c in loaded.clauses],

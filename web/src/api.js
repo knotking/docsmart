@@ -86,6 +86,36 @@ export const api = {
   endDelegation: (name) =>
     request(`/participants/${encodeURIComponent(name)}/delegate`, { method: "DELETE" }),
 
+  // --- rule intake ---------------------------------------------------------
+  sources: () => request("/sources"),
+  uploadSource: async (file, uploadedBy) => {
+    // multipart: no Content-Type header, the browser sets the boundary itself
+    const body = new FormData();
+    body.append("file", file);
+    body.append("uploaded_by", uploadedBy || "dashboard");
+    const response = await fetch("/api/sources/upload", { method: "POST", body });
+    if (!response.ok) {
+      let detail = `${response.status} ${response.statusText}`;
+      try {
+        const payload = await response.json();
+        if (payload.detail) detail = payload.detail;
+      } catch {
+        /* not JSON */
+      }
+      throw new Error(detail);
+    }
+    return response.json();
+  },
+  fetchSourceUrl: (body) =>
+    request("/sources/url", { method: "POST", body: JSON.stringify(body) }),
+  candidates: (params = {}) =>
+    request(`/candidates?${new URLSearchParams(clean(params))}`),
+  acceptCandidate: (id, body) =>
+    request(`/candidates/${id}/accept`, { method: "POST", body: JSON.stringify(body) }),
+  rejectCandidate: (id, body) =>
+    request(`/candidates/${id}/reject`, { method: "POST", body: JSON.stringify(body) }),
+  staleRuns: () => request("/rulebook/stale-runs"),
+
   // --- routing and handoffs ------------------------------------------------
   route: (runId) => request(`/runs/${runId}/route`, { method: "POST" }),
   myQueue: (runId, participant) =>

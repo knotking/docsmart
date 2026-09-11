@@ -561,3 +561,79 @@ class Handoff(SQLModel, table=True):
     resolves_handoff_id: Optional[int] = Field(default=None, foreign_key="handoff.id", index=True)
 
     __table_args__ = (Index("ix_handoff_change_at", "change_id", "at"),)
+
+
+# ------------------------------------------------------------- rule intake
+#
+# Sources uploaded or fetched to mine terminology from, and the candidate rules they
+# yield. Nothing here touches the rulebook directly: a candidate is a proposal carrying
+# the sentence it came from, and a person accepts it. The same shape as everything else
+# in this system, for the same reason - a wrong rule does not fail loudly, it quietly
+# rewrites correct text across every document on the next run.
+
+
+class SourceKind(str, Enum):
+    DOCUMENT = "document"
+    IMAGE = "image"
+    VIDEO = "video"
+    WEB = "web"
+
+
+class CandidateStatus(str, Enum):
+    PROPOSED = "proposed"
+    ACCEPTED = "accepted"
+    EDITED = "edited"      # accepted with the reviewer's own wording
+    REJECTED = "rejected"
+
+
+class RuleSource(SQLModel, table=True):
+    """Something a rule was mined from, kept so a rule can be traced back to it."""
+
+    __tablename__ = "rule_source"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(index=True)
+    kind: SourceKind = Field(index=True)
+    origin: str = Field(description="filename or URL")
+    content_sha256: Optional[str] = Field(default=None, index=True)
+    blob_uri: Optional[str] = None
+
+    uploaded_by: str = Field(default="system", index=True)
+    uploaded_at: datetime = Field(default_factory=utcnow, index=True)
+    retrieved_at: Optional[str] = None
+
+    lines_read: int = 0
+    candidates_found: int = 0
+    # What was missing to read this fully - an API key for an image, a transcript for a
+    # video. Recorded rather than silently returning nothing.
+    needs: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    notes: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+
+
+class RuleCandidate(SQLModel, table=True):
+    """A proposed rule with the line that produced it. Reviewed before it applies."""
+
+    __tablename__ = "rule_candidate"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    source_id: int = Field(foreign_key="rule_source.id", index=True)
+
+    deprecated: str = Field(index=True)
+    approved: str
+    method: str = Field(description="the extraction pattern, or 'model'")
+    confidence: float = 0.5
+
+    # Provenance. The reviewer checks the quote, not the rule.
+    quote: str = Field(default="", sa_column=Column(Text))
+    locator: str = ""
+    note: Optional[str] = Field(default=None, sa_column=Column(Text))
+    warnings: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    suggested: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+
+    status: CandidateStatus = Field(default=CandidateStatus.PROPOSED, index=True)
+    decided_by: Optional[str] = Field(default=None, index=True)
+    decided_at: Optional[datetime] = None
+    decision_note: Optional[str] = Field(default=None, sa_column=Column(Text))
+    rule_id: Optional[str] = Field(default=None, index=True,
+                                   description="the rule id created on acceptance")
+    created_at: datetime = Field(default_factory=utcnow, index=True)

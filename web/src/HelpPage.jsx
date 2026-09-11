@@ -45,7 +45,8 @@ function UsingSection() {
         <ul className="help-toc">
           <li><a href="#what">What TermGuard does</a></li>
           <li><a href="#role">Which role you have</a></li>
-          <li><a href="#queue">Working the review queue</a></li>
+          <li><a href="#sources">Adding rules from a document</a></li>
+        <li><a href="#queue">Working the review queue</a></li>
           <li><a href="#decide">Accept, reject or reword</a></li>
           <li><a href="#move">When to move a change instead</a></li>
           <li><a href="#away">Going away</a></li>
@@ -90,6 +91,47 @@ function UsingSection() {
         You may hold more than one. Your teams decide which work reaches you: each rule
         belongs to a team, and changes for that rule go to that team's queue. Check{" "}
         <strong>Teams</strong> in the sidebar to see who owns what.
+      </p>
+
+      <h2 id="sources">Adding rules from a document</h2>
+      <p>
+        On <strong>Sources</strong>, drop in a style guide, terminology SOP, glossary
+        screenshot or recorded training session — or paste the address of a web page.
+        TermGuard reads it and proposes rules from what it finds.
+      </p>
+      <p>
+        <strong>Nothing it finds is in force until you accept it.</strong> Each proposal
+        shows the sentence it came from, and that sentence is what you are reviewing —
+        not the rule. A proposed rule can look entirely sensible and still be backwards,
+        and a backwards rule does not produce an error: it changes correct wording into
+        wrong wording in every document, confidently. Read the quote.
+      </p>
+      <p>Three ways to respond:</p>
+      <ul>
+        <li><strong>Add rule</strong> — the rule reads the sentence correctly.</li>
+        <li>
+          <strong>Correct it</strong> — the right rule is in there but the wording is off.
+          Fix the terms and add it. It is recorded as edited rather than accepted, because
+          you wrote it, not the extractor.
+        </li>
+        <li><strong>Reject</strong> — not a rule, or not one you want.</li>
+      </ul>
+      <div className="help-note">
+        <strong>Warnings on a proposal are worth reading.</strong> "Already covered" means
+        an existing rule says the same thing. <strong>"CONFLICT"</strong> means an existing
+        rule says something <em>different</em> about the same term — accepting it would
+        leave the rulebook telling the scanner two things at once. Fix the disagreement
+        before adding it.
+      </div>
+      <p>
+        Some sources cannot be read fully, and the list says which and why — an image needs
+        a vision model, a video needs captions or a transcript. A source that could not be
+        read is marked as such rather than shown as one containing no terminology.
+      </p>
+      <p>
+        Adding a rule changes what "correct" means, so runs made before it can no longer be
+        verified against the current rulebook. The page tells you which runs those are.
+        Start a new run to apply what you have added.
       </p>
 
       <h2 id="queue">Working the review queue</h2>

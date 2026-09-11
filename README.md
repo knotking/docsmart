@@ -22,6 +22,7 @@ what is convenient than by what a quality auditor will ask for.
 | **D — Review & verify** | Reviewer decisions, the verification gate, the audit trail, the API | `review.py`, `verify.py`, `audit.py`, `api.py` |
 | **D — Workflow & metrics** | Participants, assignment, leases, agent authority, sign-off, metrics | `workflow.py`, `policy.py`, `metrics.py` |
 | **D — Org & teams** | Organizations, teams, membership, routing, handoffs, cover | `teams.py` |
+| **A — Rule intake** | Mine documents, pages, images and video for candidate rules | `sources.py`, `extract.py`, `intake.py` |
 | **S — Substrate** | Config, content-addressed storage, schema, document lifecycle | `config.py`, `storage.py`, `db.py`, `models.py`, `documents.py` |
 
 `pipeline.py` runs A→D over a corpus; `web/` is a dashboard that is purely a view over the
@@ -136,6 +137,53 @@ clause; delegating them would undo the containment argument entirely.
 
 So "on what authority did a machine approve this?" has a specific answer: clause `P-001`
 of policy `ef0f2cab`, which says this, approved by quality-assurance.
+
+### Where rules come from
+
+Rules can be written by hand, imported from a spreadsheet, or **mined from a source**.
+Upload a style guide, terminology SOP, glossary screenshot or recorded training session —
+or point at a web page — and what it says about terminology becomes candidate rules.
+
+```
+upload / fetch  →  read (with a locator per line)  →  extract
+                →  candidates, each quoting its source sentence
+                →  a person accepts, edits or rejects
+                →  the rulebook, hash moves, run again
+```
+
+**Nothing extracted applies on its own.** An extracted rule is not a suggestion about
+wording — it is an instruction that will rewrite text across every document on the next
+run, and the dangerous failure is *reversal*: a rule with its terms swapped produces
+confident, wrong edits rather than an error. So candidates carry the sentence they came
+from, and the reviewer reads the sentence.
+
+Extraction is patterns first, a model only for prose a pattern cannot reach. Not economy —
+a pattern match is *quotable*, identical every run, and checkable in a second:
+
+| Source says | Yields |
+| --- | --- |
+| a glossary table with a `Do not use / Use instead` heading | one rule per row, direction taken from the heading |
+| "Use mL, not ml" | `ml → mL` |
+| "The term X is deprecated; use Y" | `X → Y` |
+| a note saying "depends on context" | the rule, flagged `context_required` |
+| a table whose headings don't say which side is which | **nothing** — column order is not a fallback |
+
+Candidates are checked against the rulebook as they are extracted, so a term another rule
+already owns is flagged as a duplicate and a term another rule *contradicts* is flagged as
+a conflict before anyone accepts it.
+
+Sources are unequal, and the tool says so rather than pretending:
+
+| Source | State |
+| --- | --- |
+| `.docx`, `.pdf`, `.txt`, `.md` | works |
+| web page | works — URL and retrieval time recorded |
+| video with `.vtt` / `.srt` captions | works — each cue's timestamp is its locator |
+| images, screenshots | needs a vision model; records what it needs and reads nothing |
+| video without captions | needs a transcript or a transcription backend |
+
+Accepting a rule moves the rulebook hash, which means runs produced under the old one can
+no longer be verified. That is deliberate, and the UI lists exactly which runs it affects.
 
 ### Teams, and how work moves
 

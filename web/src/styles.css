@@ -320,3 +320,30 @@ textarea { font-family: var(--mono); font-size: 12px; resize: vertical; }
 
 .help table { margin-top: 10px; }
 .help td:first-child { color: var(--ink); }
+
+/* ---------------------------------------------------------------- sources */
+
+.dropzone {
+  border: 1.5px dashed var(--line-strong); border-radius: var(--radius);
+  padding: 26px; text-align: center; cursor: pointer; background: var(--bg);
+}
+.dropzone:hover { border-color: var(--rule); background: var(--rule-soft); }
+
+.candidate { padding-top: 14px; }
+
+/* The quote carries the weight: a reviewer checks the sentence, not the rule. */
+.quote {
+  margin: 0; padding: 10px 0 10px 14px;
+  border-left: 3px solid var(--line-strong);
+  font-size: 14.5px; line-height: 1.6; color: var(--ink);
+}
+.quote cite {
+  display: block; margin-top: 6px; font-style: normal;
+  font-size: 11.5px; color: var(--muted); font-family: var(--mono);
+}
+
+.candidate-rule {
+  display: flex; align-items: center; gap: 0;
+  margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line);
+  font-size: 15px;
+}

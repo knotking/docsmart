@@ -78,6 +78,21 @@ what changed, who or what changed it, and who approved it".
     is while it is in force and lapses on its own. Reassigning a hundred changes because
     somebody took a week off, then reassigning them back, is how work gets lost. An agent
     may never cover for a human: an absence must not quietly become machine authority.
+16. **An extracted rule is a proposal, never a rule.** Sources mined for terminology
+    (`sources.py`, `extract.py`) produce *candidates* carrying the sentence they came
+    from; only `intake.accept` writes to the rulebook, and only a person calls it. An
+    extracted rule is not a suggestion about wording - it is an instruction that rewrites
+    text across every document on the next run, and a reversed one produces confident
+    wrong edits rather than an error.
+17. **Extraction never guesses direction.** Every prose pattern declares which capture
+    group is deprecated and which is approved. A glossary table takes its direction from
+    its heading row, and a table whose headings do not say yields *nothing* - column order
+    is not a fallback. Reversing a rule is the one failure in this layer that does not
+    announce itself.
+18. **A source that cannot be read says what is missing.** An image with no vision key, a
+    video with no transcript: these record `needs` and report `readable: false`. Returning
+    empty text looks identical to a source containing no terminology, and somebody will
+    believe it.
 
 Identity remains **asserted, not proven** - authentication is still out of scope (see
 "what not to build"), and IAM in front of the service is the real boundary. What the
@@ -98,6 +113,7 @@ termguard/        config.py storage.py db.py models.py documents.py
                   rulebook.py walker.py scanner.py ooxml.py redline.py
                   judge.py pipeline.py
                   review.py workflow.py teams.py policy.py verify.py
+                  sources.py extract.py intake.py
                   audit.py metrics.py api.py
 web/              React app
 data/rulebook.yaml   terminology rules

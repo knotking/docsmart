@@ -7,6 +7,7 @@ import MetricsPage from "./MetricsPage";
 import ReviewPage from "./ReviewPage";
 import RulebookPage from "./RulebookPage";
 import RunPage from "./RunPage";
+import SourcesPage from "./SourcesPage";
 import TeamsPage from "./TeamsPage";
 import VerifyPage from "./VerifyPage";
 import WorkflowPage from "./WorkflowPage";
@@ -41,6 +42,7 @@ export default function App() {
         <div className="nav">
           <NavLink to="/metrics">Metrics</NavLink>
           <NavLink to="/rulebook">Rulebook</NavLink>
+          <NavLink to="/sources">Sources</NavLink>
           <NavLink to="/run">Run</NavLink>
           <NavLink to="/review">Review</NavLink>
           <NavLink to="/verify">Verify</NavLink>
@@ -72,6 +74,7 @@ export default function App() {
           <Route path="/" element={<Navigate to="/metrics" replace />} />
           <Route path="/metrics" element={<MetricsPage />} />
           <Route path="/rulebook" element={<RulebookPage />} />
+          <Route path="/sources" element={<SourcesPage />} />
           <Route path="/run" element={<RunPage run={run} reload={reload} />} />
           <Route path="/review" element={<ReviewPage run={run} reload={reload} />} />
           <Route path="/verify" element={<VerifyPage run={run} />} />

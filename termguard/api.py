@@ -27,13 +27,17 @@ from queue import Empty, Queue
 from threading import Thread
 from typing import Any, Iterator
 
-from fastapi import BackgroundTasks, Body, Depends, FastAPI, HTTPException, Query, Response
+from fastapi import (
+    BackgroundTasks, Body, Depends, FastAPI, File, Form, HTTPException, Query,
+    Response, UploadFile,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlmodel import Session, func, select
 
 from termguard import __version__, audit, documents, metrics, review, verify, workflow
+from termguard import intake
 from termguard import teams as teams_module
 from termguard.config import get_settings
 from termguard.db import get_session, init_db
@@ -49,6 +53,8 @@ from termguard.models import (
     Hit,
     Mechanism,
     Run,
+    RuleCandidate,
+    RuleSource,
     RunStatus,
     Stage,
     Team,
@@ -134,6 +140,27 @@ class AgentDisposeRequest(BaseModel):
 class ConfirmRequest(BaseModel):
     participant: str
     clause_id: str | None = None
+
+
+class SourceUrlRequest(BaseModel):
+    url: str
+    uploaded_by: str = "api"
+
+
+class AcceptCandidateRequest(BaseModel):
+    reviewer: str
+    owner: str = ""
+    note: str | None = None
+    overrides: dict[str, Any] | None = Field(
+        default=None,
+        description="corrections to apply before the rule lands: deprecated, approved, "
+                    "match, case, scope, context_required, context_note, rationale",
+    )
+
+
+class RejectCandidateRequest(BaseModel):
+    reviewer: str
+    note: str | None = None
 
 
 class MemberRequest(BaseModel):
@@ -1223,6 +1250,135 @@ def resolve_change_return(change_id: int, request: HandoffRequest,
                           session: Session = Depends(get_session)) -> dict[str, Any]:
     """Answer an outstanding return so the change re-enters the queue."""
     return _handoff_endpoint(change_id, request, session, "resolve")
+
+
+# ------------------------------------------------------------- rule intake
+#
+# Sources in, candidate rules out, a person in between. Nothing here writes to the
+# rulebook except /candidates/{id}/accept, and that is a deliberate human act.
+
+
+@app.post("/sources/upload", status_code=201)
+async def upload_source(
+    file: UploadFile = File(...),
+    uploaded_by: str = Form("api"),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Take in a document, image or video and mine it for candidate rules.
+
+    A source that cannot be fully read still returns 201 with ``needs`` populated. The
+    upload succeeded; the extraction is what is incomplete, and saying so is more useful
+    than an error that hides the fact the file is now on record.
+    """
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "empty file")
+    settings = get_settings()
+    try:
+        source, _ = intake.ingest_file(
+            session, data, file.filename or "upload",
+            uploaded_by=uploaded_by,
+            rulebook=load_rulebook(settings.rulebook_path),
+            store=get_store(settings),
+        )
+    except intake.IntakeError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    session.commit()
+    return intake.describe_source(session, source)
+
+
+@app.post("/sources/url", status_code=201)
+def fetch_source(
+    request: SourceUrlRequest, session: Session = Depends(get_session)
+) -> dict[str, Any]:
+    """Fetch a web page and mine it. The URL and retrieval time are the provenance."""
+    settings = get_settings()
+    try:
+        source, _ = intake.ingest_url(
+            session, request.url, uploaded_by=request.uploaded_by,
+            rulebook=load_rulebook(settings.rulebook_path),
+        )
+    except intake.IntakeError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    session.commit()
+    return intake.describe_source(session, source)
+
+
+@app.get("/sources")
+def list_sources(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
+    rows = session.exec(select(RuleSource).order_by(RuleSource.id.desc())).all()  # type: ignore[union-attr]
+    return [intake.describe_source(session, row) for row in rows]
+
+
+@app.get("/candidates")
+def list_candidates(
+    session: Session = Depends(get_session),
+    source_id: int | None = None,
+    status: str = "proposed",
+) -> dict[str, Any]:
+    """Candidate rules awaiting review, best-evidenced first."""
+    statement = select(RuleCandidate)
+    if status != "all":
+        statement = statement.where(RuleCandidate.status == status)
+    if source_id is not None:
+        statement = statement.where(RuleCandidate.source_id == source_id)
+    rows = session.exec(
+        statement.order_by(RuleCandidate.confidence.desc(), RuleCandidate.id)  # type: ignore[union-attr]
+    ).all()
+    return {
+        "total": len(rows),
+        "items": [intake.candidate_payload(session, row) for row in rows],
+    }
+
+
+@app.post("/candidates/{candidate_id}/accept")
+def accept_candidate(
+    candidate_id: int, request: AcceptCandidateRequest,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Turn a candidate into a real rule.
+
+    This is the one endpoint that changes what "correct" means, so it reports the hash
+    moving and which existing runs that invalidates.
+    """
+    settings = get_settings()
+    try:
+        candidate, rulebook = intake.accept(
+            session, candidate_id, request.reviewer,
+            rulebook_path=settings.rulebook_path,
+            owner=request.owner, overrides=request.overrides or None, note=request.note,
+        )
+    except intake.IntakeError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    session.commit()
+    return {
+        "candidate_id": candidate_id,
+        "status": candidate.status.value,
+        "rule_id": candidate.rule_id,
+        "rulebook_hash": rulebook.hash,
+        "rules": len(rulebook),
+        "runs_needing_rerun": intake.pending_reruns(session, rulebook),
+    }
+
+
+@app.post("/candidates/{candidate_id}/reject")
+def reject_candidate(
+    candidate_id: int, request: RejectCandidateRequest,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    try:
+        candidate = intake.reject(session, candidate_id, request.reviewer,
+                                  note=request.note)
+    except intake.IntakeError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    session.commit()
+    return {"candidate_id": candidate_id, "status": candidate.status.value}
+
+
+@app.get("/rulebook/stale-runs")
+def stale_runs(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
+    """Runs produced under a rulebook hash that is no longer current."""
+    return intake.pending_reruns(session, load_rulebook(get_settings().rulebook_path))
 
 
 # ------------------------------------------------------------ static frontend

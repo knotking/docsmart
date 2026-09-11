@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+htmlcov/
+node_modules/
+web/dist/
+data/blobs/
+data/out/
+termguard.db
+.docx-editor-workspaces/
+.env

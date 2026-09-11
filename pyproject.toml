@@ -1,0 +1,35 @@
+[project]
+name = "termguard"
+version = "0.1.0"
+description = "Terminology harmonization for regulated Word document sets, with tracked changes and a provable audit trail."
+requires-python = ">=3.11"
+dependencies = [
+    "python-docx>=1.1",
+    "docx-editor>=0.8.2",
+    "pydantic>=2.6",
+    "pyyaml>=6.0",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "sqlmodel>=0.0.16",
+    "anthropic>=0.25",
+    "sse-starlette>=2.0",
+    "python-multipart>=0.0.9",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-cov>=5.0", "httpx>=0.27"]
+gcp = ["google-cloud-storage>=2.16", "psycopg[binary]>=3.1", "cloud-sql-python-connector>=1.9"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["termguard*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.coverage.report]
+exclude_lines = ["pragma: no cover", "if TYPE_CHECKING:", "raise NotImplementedError"]

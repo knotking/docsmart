@@ -1,0 +1,23 @@
+Metadata-Version: 2.4
+Name: termguard
+Version: 0.1.0
+Summary: Terminology harmonization for regulated Word document sets, with tracked changes and a provable audit trail.
+Requires-Python: >=3.11
+Requires-Dist: python-docx>=1.1
+Requires-Dist: docx-editor>=0.8.2
+Requires-Dist: pydantic>=2.6
+Requires-Dist: pyyaml>=6.0
+Requires-Dist: fastapi>=0.110
+Requires-Dist: uvicorn[standard]>=0.29
+Requires-Dist: sqlmodel>=0.0.16
+Requires-Dist: anthropic>=0.25
+Requires-Dist: sse-starlette>=2.0
+Requires-Dist: python-multipart>=0.0.9
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0; extra == "dev"
+Requires-Dist: pytest-cov>=5.0; extra == "dev"
+Requires-Dist: httpx>=0.27; extra == "dev"
+Provides-Extra: gcp
+Requires-Dist: google-cloud-storage>=2.16; extra == "gcp"
+Requires-Dist: psycopg[binary]>=3.1; extra == "gcp"
+Requires-Dist: cloud-sql-python-connector>=1.9; extra == "gcp"

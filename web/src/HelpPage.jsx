@@ -1,4 +1,6 @@
+import { useState } from "react";
 import { Badge } from "./components";
+import ComparisonSection from "./ComparisonSection";
 
 /**
  * User documentation, for the people who work the queue rather than the people who
@@ -7,13 +9,37 @@ import { Badge } from "./components";
  * why won't it let me approve this.
  */
 export default function HelpPage() {
+  const [tab, setTab] = useState("using");
+
   return (
     <div className="help">
-      <h1>How to use TermGuard</h1>
+      <h1>{tab === "using" ? "How to use TermGuard" : "How TermGuard compares"}</h1>
       <p className="sub">
-        For reviewers, team leads and approvers. Everything here is about working the
-        system, not running it.
+        {tab === "using"
+          ? "For reviewers, team leads and approvers. Everything here is about working the system, not running it."
+          : "Where this sits against the tools you may already have, and where it falls short of them."}
       </p>
+
+      <div className="tabs">
+        <button className={tab === "using" ? "tab active" : "tab"} onClick={() => setTab("using")}>
+          Using TermGuard
+        </button>
+        <button
+          className={tab === "compare" ? "tab active" : "tab"}
+          onClick={() => setTab("compare")}
+        >
+          How it compares
+        </button>
+      </div>
+
+      {tab === "compare" ? <ComparisonSection /> : <UsingSection />}
+    </div>
+  );
+}
+
+function UsingSection() {
+  return (
+    <>
 
       <div className="card">
         <ul className="help-toc">
@@ -292,6 +318,6 @@ export default function HelpPage() {
         policy — spelling, unit style and similar — and anything context-dependent is
         routed to a person by design, never to a machine.
       </p>
-    </div>
+    </>
   );
 }

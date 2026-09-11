@@ -307,3 +307,16 @@ textarea { font-family: var(--mono); font-size: 12px; resize: vertical; }
   padding: 11px 14px; margin: 14px 0; font-size: 13px; color: var(--ink-2);
 }
 .help-note strong { color: var(--rule); }
+
+/* ------------------------------------------------------------------- tabs */
+
+.tabs { display: flex; gap: 4px; margin: 18px 0 4px; border-bottom: 1px solid var(--line); }
+.tab {
+  border: none; background: none; border-bottom: 2px solid transparent;
+  border-radius: 0; padding: 7px 14px; color: var(--muted); font-weight: 550;
+}
+.tab:hover:not(.active) { background: var(--bg); color: var(--ink-2); }
+.tab.active { color: var(--rule); border-bottom-color: var(--rule); background: none; }
+
+.help table { margin-top: 10px; }
+.help td:first-child { color: var(--ink); }

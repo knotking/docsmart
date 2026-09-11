@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from queue import Empty, Queue
 from threading import Thread
@@ -32,11 +33,12 @@ from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlmodel import Session, func, select
 
-from termguard import __version__, audit, documents, review, verify
+from termguard import __version__, audit, documents, metrics, review, verify, workflow
 from termguard.config import get_settings
 from termguard.db import get_session, init_db
 from termguard.models import (
     Change,
+    Participant,
     ChangeStatus,
     Decision,
     DecisionKind,
@@ -49,6 +51,7 @@ from termguard.models import (
     Stage,
 )
 from termguard.pipeline import run_pipeline
+from termguard.policy import load_policy
 from termguard.rulebook import Rule, RuleError, Rulebook, dump_rulebook, load_rulebook
 from termguard.storage import get_store
 
@@ -85,6 +88,7 @@ class DecisionRequest(BaseModel):
     reviewer: str
     final_text: str | None = None
     note: str | None = None
+    enforce_claim: bool = True
 
 
 class RunRequest(BaseModel):
@@ -97,6 +101,43 @@ class RunRequest(BaseModel):
 class RulebookRequest(BaseModel):
     rules: list[dict[str, Any]]
     version: str = "1"
+
+
+class ParticipantRequest(BaseModel):
+    name: str
+    kind: str = Field(default="human", description="human | agent")
+    roles: list[str] = Field(default_factory=lambda: ["reviewer"])
+    email: str | None = None
+    model: str | None = None
+    note: str | None = None
+
+
+class AssignRequest(BaseModel):
+    participants: list[str]
+    strategy: str = Field(default="by_file", description="by_file | by_rule | round_robin")
+    assigned_by: str = "api"
+
+
+class ClaimRequest(BaseModel):
+    participant: str
+    lease_seconds: int = 600
+
+
+class AgentDisposeRequest(BaseModel):
+    agent: str = "termguard-agent"
+    dry_run: bool = False
+
+
+class ConfirmRequest(BaseModel):
+    participant: str
+    clause_id: str | None = None
+
+
+class SignOffRequest(BaseModel):
+    participant: str
+    decision: str = Field(description="approved | rejected")
+    note: str | None = None
+    force: bool = False
 
 
 # ------------------------------------------------------------------- health
@@ -401,11 +442,22 @@ def decide(
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
     """Record a reviewer decision. Append-only: a new ruling supersedes, never overwrites."""
+    # A known participant is attributed properly; an unknown name still works, so a
+    # single-reviewer demo never has to register anybody first.
+    participant = None
+    try:
+        participant = workflow.get_participant(session, request.reviewer)
+    except workflow.WorkflowError:
+        participant = None
+
     try:
         decision = review.record_decision(
             session, change_id, request.decision, request.reviewer,
             final_text=request.final_text, note=request.note,
+            participant=participant, enforce_claim=request.enforce_claim,
         )
+    except workflow.ClaimConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     session.commit()
@@ -658,6 +710,209 @@ def _mtime(path: Path) -> str | None:
     if not path.exists():
         return None
     return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
+
+
+# -------------------------------------------------------------------- metrics
+
+
+@app.get("/metrics")
+def metrics_dashboard(
+    session: Session = Depends(get_session), run_id: int | None = None
+) -> dict[str, Any]:
+    """Everything the metrics screen needs, in one round trip."""
+    return metrics.dashboard(session, run_id)
+
+
+@app.get("/metrics/rules")
+def metrics_rules(
+    session: Session = Depends(get_session), run_id: int | None = None
+) -> list[dict[str, Any]]:
+    """Per-rule volume and override rate - what the terminology owner acts on."""
+    return metrics.rule_health(session, run_id)
+
+
+# --------------------------------------------------------------------- policy
+
+
+@app.get("/policy")
+def read_policy() -> dict[str, Any]:
+    """The agent-authority policy: what a machine is permitted to decide, and why."""
+    loaded = load_policy(_policy_path())
+    return {
+        **loaded.summary(),
+        "default_risk": loaded.default_risk.value,
+        "risk_by_rule": {k: v.value for k, v in loaded.risk_by_rule.items()},
+        "clauses": [c.model_dump(mode="json") for c in loaded.clauses],
+    }
+
+
+def _policy_path() -> Path:
+    settings = get_settings()
+    return Path(os.environ.get("TERMGUARD_POLICY", settings.rulebook_path.parent / "policy.yaml"))
+
+
+# --------------------------------------------------------------- participants
+
+
+@app.get("/participants")
+def list_participants(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
+    rows = session.exec(select(Participant).order_by(Participant.name)).all()
+    return [
+        {
+            "participant_id": p.id,
+            "name": p.name,
+            "email": p.email,
+            "kind": p.kind.value,
+            "roles": p.roles,
+            "active": p.active,
+            "model": p.model,
+            "policy_hash": p.policy_hash,
+            "decisions": session.exec(
+                select(func.count()).select_from(Decision).where(Decision.reviewer == p.name)
+            ).one(),
+        }
+        for p in rows
+    ]
+
+
+@app.post("/participants", status_code=201)
+def create_participant(
+    request: ParticipantRequest, session: Session = Depends(get_session)
+) -> dict[str, Any]:
+    try:
+        participant = workflow.ensure_participant(
+            session, request.name, kind=request.kind, roles=request.roles,
+            email=request.email, model=request.model, note=request.note,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, str(exc)) from exc
+    session.commit()
+    return {"participant_id": participant.id, "name": participant.name,
+            "kind": participant.kind.value, "roles": participant.roles}
+
+
+# -------------------------------------------------------------- assignment
+
+
+@app.post("/runs/{run_id}/assign")
+def assign_changes(
+    run_id: int, request: AssignRequest, session: Session = Depends(get_session)
+) -> dict[str, Any]:
+    """Spread the undecided changes across reviewers."""
+    try:
+        participants = [workflow.get_participant(session, name) for name in request.participants]
+        spread = workflow.auto_assign(
+            session, run_id, participants, strategy=request.strategy,
+            assigned_by=request.assigned_by,
+        )
+    except workflow.WorkflowError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    session.commit()
+    return {"strategy": request.strategy, "assigned": spread}
+
+
+# ------------------------------------------------------------------ claims
+
+
+@app.post("/changes/{change_id}/claim")
+def claim_change(
+    change_id: int, request: ClaimRequest, session: Session = Depends(get_session)
+) -> dict[str, Any]:
+    """Take the lease on a change so another reviewer cannot decide it underneath you."""
+    try:
+        participant = workflow.get_participant(session, request.participant)
+        held = workflow.claim(session, change_id, participant,
+                              lease_seconds=request.lease_seconds)
+    except workflow.ClaimConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except workflow.WorkflowError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    session.commit()
+    return {"change_id": change_id, "participant": request.participant,
+            "expires_at": held.expires_at.isoformat()}
+
+
+@app.delete("/changes/{change_id}/claim")
+def release_change(
+    change_id: int, participant: str, session: Session = Depends(get_session)
+) -> dict[str, Any]:
+    try:
+        who = workflow.get_participant(session, participant)
+    except workflow.WorkflowError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    released = workflow.release(session, change_id, who)
+    session.commit()
+    return {"change_id": change_id, "released": released}
+
+
+# ------------------------------------------------------------ agent actions
+
+
+@app.post("/runs/{run_id}/agent-dispose")
+def agent_dispose(
+    run_id: int, request: AgentDisposeRequest, session: Session = Depends(get_session)
+) -> dict[str, Any]:
+    """Let an agent decide everything the policy authorizes; leave the rest to humans."""
+    loaded = load_policy(_policy_path())
+    try:
+        agent = workflow.ensure_participant(
+            session, request.agent, kind="agent", roles=["reviewer"],
+            model=get_settings().anthropic_model, policy_hash=loaded.hash,
+        )
+        result = workflow.agent_dispose(session, run_id, agent, loaded, dry_run=request.dry_run)
+    except workflow.WorkflowError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    session.commit()
+    return {
+        "agent": result.agent, "policy_hash": result.policy_hash,
+        "decided": result.decided, "left_to_humans": result.left_to_humans,
+        "needs_confirmation": result.needs_confirmation, "by_clause": result.by_clause,
+        "dry_run": request.dry_run,
+    }
+
+
+@app.post("/runs/{run_id}/confirm-agent-batch")
+def confirm_agent_batch(
+    run_id: int, request: ConfirmRequest, session: Session = Depends(get_session)
+) -> dict[str, Any]:
+    """A human confirming agent decisions a clause said needed confirming."""
+    try:
+        confirmer = workflow.get_participant(session, request.participant)
+        count = workflow.confirm_agent_batch(session, run_id, confirmer, request.clause_id)
+    except workflow.WorkflowError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    session.commit()
+    return {"confirmed": count, "by": request.participant, "clause_id": request.clause_id}
+
+
+# ----------------------------------------------------------------- sign-off
+
+
+@app.get("/runs/{run_id}/signoff")
+def signoff_readiness(run_id: int, session: Session = Depends(get_session)) -> dict[str, Any]:
+    """What is blocking sign-off, and who is eligible to give it."""
+    return workflow.signoff_readiness(session, run_id)
+
+
+@app.post("/runs/{run_id}/signoff")
+def sign_off_run(
+    run_id: int, request: SignOffRequest, session: Session = Depends(get_session)
+) -> dict[str, Any]:
+    """Approve or reject a whole run. Separation of duties has no override."""
+    try:
+        participant = workflow.get_participant(session, request.participant)
+        row = workflow.sign_off(
+            session, run_id, participant, request.decision,
+            note=request.note, policy=load_policy(_policy_path()), force=request.force,
+        )
+    except workflow.WorkflowError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {
+        "signoff_id": row.id, "run_id": run_id, "participant": participant.name,
+        "decision": row.decision.value, "signed_at": row.signed_at.isoformat(),
+        "covered": row.covered, "rulebook_hash": row.rulebook_hash,
+        "policy_hash": row.policy_hash,
+    }
 
 
 # ------------------------------------------------------------ static frontend

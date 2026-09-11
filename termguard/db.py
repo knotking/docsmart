@@ -49,12 +49,17 @@ def get_engine(settings: Settings | None = None) -> Engine:
     return engine
 
 
-def init_db(settings: Settings | None = None) -> Engine:
-    """Create tables if absent. Safe to call repeatedly."""
+def init_db(settings: Settings | None = None, *, strict: bool = True) -> Engine:
+    """Create tables if absent, then verify the existing ones match the models.
+
+    ``strict=False`` reports drift without raising, for tooling that wants to inspect a
+    stale database rather than refuse it.
+    """
     import termguard.models  # noqa: F401  (registers tables on SQLModel.metadata)
 
     engine = get_engine(settings)
     SQLModel.metadata.create_all(engine)
+    check_schema(engine, strict=strict)
     return engine
 
 
@@ -82,3 +87,54 @@ def reset_engine() -> None:
     if _engine is not None:
         _engine.dispose()
     _engine, _engine_url = None, None
+
+
+# ----------------------------------------------------------- schema drift
+#
+# ``create_all`` creates missing tables but never alters existing ones, so adding a column
+# to a model leaves an older database silently short of it - and the failure surfaces much
+# later, as an OperationalError deep inside an unrelated request. This turns that into a
+# clear message at startup, naming the columns and what to do about it.
+#
+# It is a guard rail, not a migration tool. Before the first schema change against a
+# database holding real data, add Alembic (see deploy/README.md).
+
+
+def schema_drift(engine: Engine | None = None) -> dict[str, list[str]]:
+    """Columns the models declare that the database does not have, by table."""
+    import termguard.models  # noqa: F401  (registers tables)
+
+    from sqlalchemy import inspect
+
+    engine = engine or get_engine()
+    inspector = inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+
+    drift: dict[str, list[str]] = {}
+    for name, table in SQLModel.metadata.tables.items():
+        if name not in existing_tables:
+            continue  # create_all will make it
+        actual = {column["name"] for column in inspector.get_columns(name)}
+        missing = [column.name for column in table.columns if column.name not in actual]
+        if missing:
+            drift[name] = missing
+    return drift
+
+
+class SchemaDriftError(RuntimeError):
+    """The database predates the current models."""
+
+
+def check_schema(engine: Engine | None = None, *, strict: bool = True) -> dict[str, list[str]]:
+    """Report - and by default refuse to continue on - schema drift."""
+    drift = schema_drift(engine)
+    if drift and strict:
+        detail = "; ".join(f"{table} is missing {', '.join(cols)}" for table, cols in drift.items())
+        raise SchemaDriftError(
+            f"the database predates the current models: {detail}.\n"
+            "This build has no migrations. For the demo database, recreate it:\n"
+            "    python scripts/demo.py --reset\n"
+            "For a database holding real data, add Alembic and write a migration - see "
+            "deploy/README.md."
+        )
+    return drift

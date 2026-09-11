@@ -48,6 +48,28 @@ what changed, who or what changed it, and who approved it".
    through SQLModel with a URL from config, so SQLite (local) and Cloud SQL Postgres (GCP)
    are the same code path. Nothing may assume a local filesystem or SQLite dialect.
 
+### Added constraints (multi-participant workflow)
+
+10. **An agent's authority is data, not code.** What a machine may decide on its own lives
+    in `data/policy.yaml`, is hashed like the rulebook, and every agent decision records
+    the clause id and policy hash that authorized it. Anything no clause covers goes to a
+    human, and *that default is not configurable* - a policy that can grant blanket
+    authority by omission is not a policy. Rules the rulebook marks `context_required`
+    must never appear in a clause; delegating them would undo constraint 3.
+11. **Separation of duties is enforced, not documented.** Whoever recorded decisions in a
+    run may not sign it off, and an agent may never sign off anything. `sign_off` has a
+    `force` flag for rejecting an incomplete run; it does **not** override the two-person
+    rule, and must not be given one.
+12. **Decisions cannot silently overwrite each other.** A change being worked on is held
+    under a lease. Without it, two reviewers on one queue both decide change 412 and the
+    append-only log faithfully records the second superseding the first with nobody the
+    wiser. Leases expire so a closed laptop does not block the queue.
+
+Identity remains **asserted, not proven** - authentication is still out of scope (see
+"what not to build"), and IAM in front of the service is the real boundary. What the
+`Participant` table buys is *attribution*: the trail can never report an agent decision as
+if a person made it.
+
 ## STACK
 
 Python 3.11+ (developed on 3.12), FastAPI, SQLite via SQLModel (Postgres-compatible),
@@ -60,14 +82,20 @@ LLM step, React + Vite frontend, pytest. No other frameworks without asking.
 ```
 termguard/        config.py storage.py db.py models.py documents.py
                   rulebook.py walker.py scanner.py ooxml.py redline.py
-                  judge.py audit.py verify.py api.py
+                  judge.py pipeline.py
+                  review.py workflow.py policy.py verify.py
+                  audit.py metrics.py api.py
 web/              React app
-data/rulebook.yaml
+data/rulebook.yaml   terminology rules
+data/policy.yaml     what an agent may decide on its own
 data/corpus/      inputs
 data/out/         outputs (redlined/, final/)
 data/blobs/       local object store (content-addressed)
 tests/ scripts/ deploy/
 ```
+
+**Layer letters:** A rulebook · B scan · C redline · D review/verify/workflow/metrics ·
+S substrate.
 
 ## docx-editor notes
 
@@ -128,6 +156,10 @@ does not exist). `scripts/make_corpus.py` writes `word/footnotes.xml` directly.
 ## CONVENTIONS
 
 - Type hints everywhere.
+- **This build has no migrations.** `create_all` adds missing tables but never alters
+  existing ones, so `init_db` runs a schema-drift check and refuses to start against a
+  database that predates the models. Before the first schema change against real data,
+  add Alembic (see `deploy/README.md`).
 - Every module has a docstring naming its layer: **A** rulebook, **B** scan, **C** redline,
   **D** review/verify, **S** substrate (config, storage, db, models, documents, audit).
 - Tests for the deterministic pipeline are mandatory; coverage of `walker`, `scanner`,

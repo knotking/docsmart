@@ -20,6 +20,7 @@ what is convenient than by what a quality auditor will ask for.
 | **B — Scan** | Reach every paragraph in every document part; find and classify matches | `walker.py`, `scanner.py` |
 | **C — Redline** | Write tracked changes: deterministic ones by code, judgment calls by the LLM | `redline.py`, `ooxml.py`, `judge.py` |
 | **D — Review & verify** | Reviewer decisions, the verification gate, the audit trail, the API | `review.py`, `verify.py`, `audit.py`, `api.py` |
+| **D — Workflow & metrics** | Participants, assignment, leases, agent authority, sign-off, metrics | `workflow.py`, `policy.py`, `metrics.py` |
 | **S — Substrate** | Config, content-addressed storage, schema, document lifecycle | `config.py`, `storage.py`, `db.py`, `models.py`, `documents.py` |
 
 `pipeline.py` runs A→D over a corpus; `web/` is a dashboard that is purely a view over the
@@ -78,6 +79,98 @@ a content hash, its parent, the run that produced it and the actor responsible.
 **9. No cloud-specific code outside `storage.py` and `config.py`.** SQLite and Cloud SQL
 are the same code path; a local directory and a GCS bucket are the same interface.
 
+And three for working as a team:
+
+**10. An agent's authority is data.** `data/policy.yaml` says which changes a machine may
+decide on its own; it is hashed like the rulebook, and every agent decision records the
+clause that authorized it.
+
+**11. Separation of duties is enforced.** Whoever reviewed a run cannot sign it off, and
+no agent signs anything off.
+
+**12. Decisions cannot silently overwrite each other.** A change being worked on is held
+under an expiring lease.
+
+---
+
+## Working as a team
+
+Several people — and several agents — work one run together.
+
+**Participants** are typed. A human and an agent are not interchangeable, and the audit
+trail never blurs them: every decision resolves to a `Participant` row with a kind and a
+set of roles. Identity is *asserted*, not proven — authentication is out of scope and IAM
+in front of the service is the real boundary. What the table buys is attribution.
+
+**Work is routed and held.** `auto_assign` spreads undecided changes across reviewers;
+`by_file` is the default because a reviewer who has read the document makes faster, better
+calls on the rest of it than one parachuted into paragraph 14. A reviewer then *claims* a
+change under a short lease. Without that, two people on one queue both decide change 412
+and the append-only log faithfully records the second superseding the first with nobody
+the wiser. Leases expire, so a closed laptop does not block the queue.
+
+**Agents decide only what a written policy permits.**
+
+```yaml
+# data/policy.yaml
+agent_may_decide:
+  - id: P-001
+    rules: [R-006, R-007, R-008]     # US spelling, unit style, hyphenation
+    classifications: [unambiguous]
+    max_risk: low
+    rationale: >-
+      Orthographic rules with no semantic content. A wrong decision here produces a
+      typo, not a regulatory misstatement.
+```
+
+Anything no clause covers goes to a human, and that default is not configurable. A clause
+may also set `requires_human_confirm`, which lets an agent clear a repetitive batch — the
+same header string on 40 pages — while still requiring a person to confirm it before
+sign-off. Rules the rulebook marks `context_required` are deliberately absent from every
+clause; delegating them would undo the containment argument entirely.
+
+So "on what authority did a machine approve this?" has a specific answer: clause `P-001`
+of policy `ef0f2cab`, which says this, approved by quality-assurance.
+
+**Sign-off is maker-checker.** A run is approved by someone holding the approver role who
+recorded no decisions in it. An agent can never sign off, even if granted the role. The
+`force` flag skips the readiness checks so an incomplete run can be explicitly *rejected* —
+it does not override the two-person rule, and deliberately has no way to.
+
+On the demo corpus this comes out as: the agent disposes of 96 of 286 changes under two
+clauses, two reviewers split the remaining 190 by file, one of them confirms the 20 the
+policy flagged, and an uninvolved approver signs the run off. Alice, who reviewed 95 of
+them, is refused — and the UI shows her why rather than hiding the button.
+
+---
+
+## Metrics
+
+`/metrics` is the landing screen, and it answers four questions:
+
+- **Posture** — documents under management, how many verified clean, decisions pending.
+- **How much a machine decided** — the automation rate, and agent decisions broken out by
+  the policy clause that authorized each one. Any decision with no clause behind it is
+  flagged as an error, because that would be a bug in the control.
+- **Trust in the model** — not the model's confidence, which is unfalsifiable, but *what
+  reviewers did with its proposals*. Acceptance and override rates over AI-proposed
+  changes that got a human verdict. Agent-decided changes are reported separately as
+  delegated volume and never folded into an accuracy number: an agent ruling on itself is
+  not evidence.
+- **Rule health** — per-rule volume and override rate, sorted worst first. A rule whose
+  proposals get overturned 40% of the time has a wrong approved term or a wrong context
+  note, and that shows up here long before it becomes an incident.
+
+Two deliberate choices: a metric with an empty denominator renders "no data", never 0%,
+because those mean different things and a dashboard that draws them identically will
+mislead someone. And the review-pace estimate is suppressed entirely unless there is real
+elapsed time behind it — a rate extrapolated from a batch script is fiction someone will
+plan against.
+
+The categorical palette (rule engine vs AI) is validated for colorblind separation rather
+than chosen by eye; the original, prettier pair failed the chroma floor and read as gray
+in a thin bar segment, which is exactly where that distinction has to survive.
+
 ---
 
 ## Document lifecycle
@@ -108,9 +201,12 @@ From that you can, at any later date:
 ```bash
 make install        # venv, Python deps, npm deps
 make corpus         # generate the 26-document synthetic corpus
-make test           # 250 tests; prints scanner precision and recall
-make demo           # the whole pipeline, ending on the verification gate
+make test           # the full suite; prints scanner precision and recall
+make demo           # pipeline -> agent + two reviewers -> gate -> sign-off
 ```
+
+`make demo` runs the multi-participant workflow. `python scripts/demo.py --solo` gives the
+single-reviewer version instead.
 
 Then, for the dashboard:
 
@@ -162,6 +258,7 @@ unchanged corpus makes no API calls.
 | `TERMGUARD_CORPUS_DIR` | `data/corpus` | input documents |
 | `TERMGUARD_OUT_DIR` | `data/out` | exported redlined/final copies and reports |
 | `TERMGUARD_RULEBOOK` | `data/rulebook.yaml` | rulebook path |
+| `TERMGUARD_POLICY` | `data/policy.yaml` | agent-authority policy path |
 | `TERMGUARD_LLM_LIVE` | `0` | `1` to call the API instead of using fixtures |
 | `ANTHROPIC_MODEL` | `claude-opus-5` | model for the judgment step |
 | `ANTHROPIC_API_KEY` | — | required only when `TERMGUARD_LLM_LIVE=1` |

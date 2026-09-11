@@ -9,10 +9,15 @@
   --line: #dde2e8;
   --line-strong: #c3cbd6;
 
-  --rule: #1f6f8b;          /* deterministic / rule engine */
-  --rule-soft: #e2eef3;
-  --ai: #8a5a2b;            /* AI-proposed */
-  --ai-soft: #f6ebdf;
+  /* The categorical pair. Validated with the dataviz palette checker: lightness band,
+     chroma floor, CVD separation (protan dE 17.7 / tritan 20.9), normal-vision dE 21.3,
+     and contrast vs surface all pass. The earlier, prettier #1f6f8b/#8a5a2b failed the
+     chroma floor - both read as gray in a thin bar segment, which is exactly where this
+     distinction has to survive. */
+  --rule: #0a6d94;          /* deterministic / rule engine */
+  --rule-soft: #e3eff4;
+  --ai: #94560d;            /* AI-proposed */
+  --ai-soft: #f7ecdd;
 
   --ok: #2f6f4f;
   --ok-soft: #e2f0e8;
@@ -142,7 +147,7 @@ button {
 button:hover:not(:disabled) { background: var(--bg); }
 button:disabled { opacity: 0.5; cursor: default; }
 button.primary { background: var(--rule); border-color: var(--rule); color: #fff; }
-button.primary:hover:not(:disabled) { background: #195b73; }
+button.primary:hover:not(:disabled) { background: #085878; }
 button.accept { background: var(--ok); border-color: var(--ok); color: #fff; }
 button.reject { background: var(--warn); border-color: var(--warn); color: #fff; }
 
@@ -201,3 +206,38 @@ textarea { font-family: var(--mono); font-size: 12px; resize: vertical; }
 }
 .tl-item.version::before { background: var(--rule); border-color: var(--rule); }
 .tl-item .when { color: var(--muted); font-size: 11px; font-family: var(--mono); }
+
+/* ------------------------------------------------------------- metrics */
+
+/* A 2px surface gap between abutting fills. Without it two segments of similar
+   lightness read as one mark, and the mechanism split is the distinction that most
+   needs to survive being glanced at. */
+.split-gap { width: 2px; flex: 0 0 2px; background: var(--surface); }
+
+.meter { margin-bottom: 14px; }
+.meter-head { display: flex; justify-content: space-between; align-items: baseline; font-size: 13px; margin-bottom: 4px; }
+.meter-head strong { font-size: 17px; letter-spacing: -0.01em; }
+.meter-empty { color: var(--muted); font-size: 12px; font-style: italic; }
+.meter .track { background: var(--bg); border: 1px solid var(--line); border-radius: 3px; height: 8px; overflow: hidden; }
+.meter .fill { height: 100%; border-radius: 0 2px 2px 0; }
+.meter .fill.rule { background: var(--rule); }
+.meter .fill.ai { background: var(--ai); }
+.meter .fill.ok { background: var(--ok); }
+.meter .fill.caution { background: #9a7b1f; }
+.meter .fill.warn { background: var(--warn); }
+.meter-detail { color: var(--muted); font-size: 12px; margin-top: 4px; }
+
+.attention { display: flex; gap: 11px; align-items: flex-start; padding: 11px 14px; border-radius: var(--radius); margin-bottom: 8px; border: 1px solid var(--line); background: var(--surface); }
+.attention .glyph { font-family: var(--mono); font-weight: 700; font-size: 11px; min-width: 26px; height: 20px; display: flex; align-items: center; justify-content: center; border-radius: 3px; }
+.attention.ok { border-color: #bcd9c8; background: var(--ok-soft); }
+.attention.ok .glyph { background: var(--ok); color: #fff; }
+.attention.info .glyph { background: var(--rule-soft); color: var(--rule); }
+.attention.warn { border-color: #e2c9a8; background: #fdf6ec; }
+.attention.warn .glyph { background: #9a7b1f; color: #fff; }
+.attention.error { border-color: #e0b6ab; background: var(--warn-soft); }
+.attention.error .glyph { background: var(--warn); color: #fff; }
+
+.kpi { display: grid; grid-template-columns: repeat(auto-fit, minmax(158px, 1fr)); gap: 12px; margin-bottom: 14px; }
+.kpi .card { margin: 0; }
+.hero { font-size: 34px; font-weight: 600; letter-spacing: -0.025em; line-height: 1.1; }
+.hero-unit { font-size: 15px; font-weight: 500; color: var(--muted); margin-left: 3px; }

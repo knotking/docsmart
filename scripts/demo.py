@@ -18,7 +18,9 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from termguard import documents, review, verify  # noqa: E402
+from termguard import documents, review, verify, workflow  # noqa: E402
+from termguard.models import DecisionKind, ParticipantKind, Role, SignOffDecision  # noqa: E402
+from termguard.policy import load_policy  # noqa: E402
 from termguard.config import get_settings  # noqa: E402
 from termguard.db import init_db, session_scope  # noqa: E402
 from termguard.pipeline import run_pipeline  # noqa: E402
@@ -35,6 +37,9 @@ def main() -> int:
     parser.add_argument("--reset", action="store_true", help="start from an empty database")
     parser.add_argument("--inject-stray-edit", action="store_true",
                         help="prove the gate catches an unapproved edit")
+    parser.add_argument("--solo", action="store_true",
+                        help="one reviewer accepting everything, instead of the "
+                             "multi-participant workflow")
     args = parser.parse_args()
 
     settings = get_settings()
@@ -65,10 +70,13 @@ def main() -> int:
     print(f"  AI escalated     {stats['ai_escalated']}")
     print(f"  skipped          {stats['skipped']}")
 
-    heading("2. Review: auto-accepting every change (dry-run only)")
-    with session_scope(settings) as session:
-        accepted = review.auto_accept_all(session, run_id, reviewer=args.reviewer)
-    print(f"  {accepted} changes accepted by {args.reviewer}")
+    if args.solo:
+        heading("2. Review: one reviewer accepting everything (dry-run only)")
+        with session_scope(settings) as session:
+            accepted = review.auto_accept_all(session, run_id, reviewer=args.reviewer)
+        print(f"  {accepted} changes accepted by {args.reviewer}")
+    else:
+        _run_workflow(settings, run_id, args.reviewer)
 
     if args.inject_stray_edit:
         heading("2b. Injecting an unapproved edit into the reviewed document")
@@ -110,7 +118,31 @@ def main() -> int:
             if not item.passed:
                 print(f"    {item.name}: {'; '.join(item.failure_reasons)}")
 
-    heading("4. Document lifecycle")
+    if not args.solo and passed:
+        heading("4. Sign-off (maker-checker)")
+        with session_scope(settings) as session:
+            policy = load_policy(REPO_ROOT / "data" / "policy.yaml")
+            readiness = workflow.signoff_readiness(session, run_id)
+            print(f"  ready: {readiness['ready']}")
+            print(f"  eligible approvers: {', '.join(readiness['eligible_approvers']) or 'none'}")
+
+            reviewer = workflow.get_participant(session, "alice@meridian")
+            ok, why = workflow.separation_of_duties(session, run_id, reviewer)
+            print(f"\n  can alice (who reviewed) approve? {ok}")
+            for reason in why:
+                print(f"    - {reason}")
+
+            approver = workflow.get_participant(session, "dana@meridian")
+            record = workflow.sign_off(
+                session, run_id, approver, SignOffDecision.APPROVED,
+                note="Terminology review complete; verification passed.", policy=policy,
+            )
+            print(f"\n  {approver.name} approved run {run_id}")
+            print(f"    covered:       {record.covered}")
+            print(f"    rulebook hash: {record.rulebook_hash}")
+            print(f"    policy hash:   {record.policy_hash}")
+
+    heading("5. Document lifecycle" if not args.solo else "4. Document lifecycle")
     with session_scope(settings) as session:
         from sqlmodel import select
         from termguard.models import Document
@@ -128,6 +160,53 @@ def main() -> int:
     print(f"  report:  {(settings.out_dir / 'verification.md').relative_to(REPO_ROOT)}")
     print(f"  elapsed: {time.time() - started:.1f}s\n")
     return 0 if (passed != args.inject_stray_edit) else 1
+
+
+def _run_workflow(settings, run_id: int, approver_email: str) -> None:
+    """Two reviewers and an agent clear the queue, with claims and policy in force."""
+    heading("2. Review: two reviewers and an agent")
+    policy = load_policy(REPO_ROOT / "data" / "policy.yaml")
+
+    with session_scope(settings) as session:
+        alice = workflow.ensure_participant(session, "alice@meridian", roles=[Role.REVIEWER])
+        bob = workflow.ensure_participant(session, "bob@meridian", roles=[Role.REVIEWER])
+        dana = workflow.ensure_participant(session, "dana@meridian", roles=[Role.APPROVER])
+        agent = workflow.ensure_participant(
+            session, "termguard-agent", kind=ParticipantKind.AGENT, roles=[Role.REVIEWER],
+            model=settings.anthropic_model, policy_hash=policy.hash,
+        )
+        print(f"  participants: alice, bob (reviewers), dana (approver), "
+              f"{agent.name} (agent)")
+        print(f"  policy {policy.hash}: agents may decide "
+              f"{', '.join(policy.summary()['rules_agents_may_decide'])} and nothing else")
+
+        outcome = workflow.agent_dispose(session, run_id, agent, policy)
+        print(f"\n  agent decided {outcome.decided} "
+              f"({', '.join(f'{k}:{v}' for k, v in outcome.by_clause.items())}), "
+              f"left {outcome.left_to_humans} to humans")
+        if outcome.needs_confirmation:
+            print(f"    {outcome.needs_confirmation} of those need a human to confirm")
+
+        spread = workflow.auto_assign(session, run_id, [alice, bob], strategy="by_file")
+        print(f"\n  assigned by file: "
+              + ", ".join(f"{name.split('@')[0]} {count}" for name, count in spread.items()))
+
+        # Reviewers work their own queues, claiming each change so they cannot collide.
+        decided = {"accepted": 0, "rejected": 0, "edited": 0}
+        for change in list(review.pending_changes(session, run_id)):
+            assignee = workflow.current_assignee(session, change.id) or alice
+            workflow.claim(session, change.id, assignee)
+            review.record_decision(
+                session, change.id, DecisionKind.ACCEPTED, assignee.name,
+                participant=assignee,
+            )
+            workflow.release(session, change.id, assignee)
+            decided["accepted"] += 1
+        print(f"  reviewers decided {decided['accepted']}")
+
+        confirmed = workflow.confirm_agent_batch(session, run_id, alice)
+        if confirmed:
+            print(f"  alice confirmed {confirmed} agent decision(s) that required it")
 
 
 def _inject(data: bytes) -> bytes:

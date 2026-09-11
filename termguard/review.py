@@ -7,7 +7,7 @@ editing the old one, so the trail shows that a decision was revised and by whom.
 
 from __future__ import annotations
 
-from typing import Any, Sequence
+from typing import TYPE_CHECKING, Any, Sequence
 
 from sqlmodel import Session, select
 
@@ -21,8 +21,12 @@ from termguard.models import (
     Document,
     Hit,
     Mechanism,
+    Participant,
     Run,
 )
+
+if TYPE_CHECKING:  # avoid a cycle: workflow imports this module
+    from termguard.policy import Clause
 
 
 def record_decision(
@@ -33,8 +37,22 @@ def record_decision(
     *,
     final_text: str | None = None,
     note: str | None = None,
+    participant: Participant | None = None,
+    clause: "Clause | None" = None,
+    policy_hash: str | None = None,
+    enforce_claim: bool = True,
 ) -> Decision:
-    """Record one reviewer decision. Never updates an existing row."""
+    """Record one reviewer decision. Never updates an existing row.
+
+    When ``participant`` is given, the decision is attributed to that row and - if the
+    participant is an agent - a policy clause is *required*. An agent decision with no
+    clause behind it is refused here rather than discovered later, because the whole
+    argument for letting a machine decide anything rests on being able to name the
+    authority for each one.
+
+    ``enforce_claim`` blocks a decision on a change another participant currently holds,
+    which is what stops two reviewers on the same queue silently overwriting each other.
+    """
     change = session.get(Change, change_id)
     if change is None:
         raise ValueError(f"no change {change_id}")
@@ -43,6 +61,20 @@ def record_decision(
     if kind is DecisionKind.EDITED and not (final_text or "").strip():
         raise ValueError("an 'edited' decision requires final_text")
 
+    decided_by_kind = ActorKind.HUMAN
+    if participant is not None:
+        if participant.is_agent:
+            if clause is None:
+                raise ValueError(
+                    f"{participant.name} is an agent; an agent decision must name the "
+                    "policy clause that authorizes it"
+                )
+            decided_by_kind = ActorKind.LLM
+        if enforce_claim:
+            from termguard.workflow import check_claim
+
+            check_claim(session, change_id, participant)
+
     row = Decision(
         change_id=change_id,
         run_id=change.run_id,
@@ -50,6 +82,11 @@ def record_decision(
         reviewer=reviewer,
         final_text=final_text,
         note=note,
+        participant_id=participant.id if participant else None,
+        decided_by_kind=decided_by_kind,
+        policy_clause_id=clause.id if clause else None,
+        policy_hash=policy_hash,
+        requires_human_confirm=bool(clause and clause.requires_human_confirm),
     )
     session.add(row)
     session.flush()
@@ -63,7 +100,7 @@ def record_decision(
         session, "decision.recorded",
         summary=f"{reviewer} {kind.value} change {change_id}"
                 + (f" ({hit.rule_id})" if hit else ""),
-        actor=reviewer, actor_kind=ActorKind.HUMAN,
+        actor=reviewer, actor_kind=decided_by_kind,
         run_id=change.run_id, document_id=change.document_id,
         document_version_id=change.document_version_id,
         hit_id=change.hit_id, change_id=change_id,
@@ -74,6 +111,11 @@ def record_decision(
             "note": note,
             "proposed": change.proposed_text,
             "original": change.original_text,
+            **({"decided_by": participant.name, "participant_kind": participant.kind.value}
+               if participant else {}),
+            **({"policy_clause_id": clause.id, "policy_hash": policy_hash,
+                "requires_human_confirm": clause.requires_human_confirm}
+               if clause else {}),
         },
     )
     return row
@@ -141,5 +183,24 @@ def queue_item(session: Session, change: Change) -> dict[str, Any]:
         "justification": change.justification,
         "decision": latest.decision.value if latest else None,
         "reviewer": latest.reviewer if latest else None,
+        "decided_by_kind": latest.decided_by_kind.value if latest else None,
+        "policy_clause_id": latest.policy_clause_id if latest else None,
+        "requires_human_confirm": latest.requires_human_confirm if latest else False,
+        "confirmed_by": latest.confirmed_by if latest else None,
         "final_text": latest.final_text if latest else None,
+        **_workflow_context(session, change),
+    }
+
+
+def _workflow_context(session: Session, change: Change) -> dict[str, Any]:
+    """Who this change is routed to, and whether anyone is on it right now."""
+    from termguard.workflow import active_claim, current_assignee
+
+    assignee = current_assignee(session, change.id)  # type: ignore[arg-type]
+    held = active_claim(session, change.id)  # type: ignore[arg-type]
+    holder = session.get(Participant, held.participant_id) if held else None
+    return {
+        "assigned_to": assignee.name if assignee else None,
+        "claimed_by": holder.name if holder else None,
+        "claim_expires_at": held.expires_at.isoformat() if held else None,
     }

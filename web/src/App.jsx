@@ -2,10 +2,12 @@ import { useCallback, useEffect, useState } from "react";
 import { NavLink, Navigate, Route, Routes } from "react-router-dom";
 import { api } from "./api";
 import DocumentsPage from "./DocumentsPage";
+import MetricsPage from "./MetricsPage";
 import ReviewPage from "./ReviewPage";
 import RulebookPage from "./RulebookPage";
 import RunPage from "./RunPage";
 import VerifyPage from "./VerifyPage";
+import WorkflowPage from "./WorkflowPage";
 
 export default function App() {
   const [run, setRun] = useState(null);
@@ -35,11 +37,13 @@ export default function App() {
           </small>
         </div>
         <div className="nav">
+          <NavLink to="/metrics">Metrics</NavLink>
           <NavLink to="/rulebook">Rulebook</NavLink>
           <NavLink to="/run">Run</NavLink>
           <NavLink to="/review">Review</NavLink>
           <NavLink to="/verify">Verify</NavLink>
           <NavLink to="/documents">Documents</NavLink>
+          <NavLink to="/workflow">Workflow</NavLink>
         </div>
         {run && (
           <div className="sub" style={{ padding: "18px 20px 0", fontSize: 11 }}>
@@ -52,12 +56,14 @@ export default function App() {
 
       <main className="main">
         <Routes>
-          <Route path="/" element={<Navigate to="/run" replace />} />
+          <Route path="/" element={<Navigate to="/metrics" replace />} />
+          <Route path="/metrics" element={<MetricsPage />} />
           <Route path="/rulebook" element={<RulebookPage />} />
           <Route path="/run" element={<RunPage run={run} reload={reload} />} />
           <Route path="/review" element={<ReviewPage run={run} reload={reload} />} />
           <Route path="/verify" element={<VerifyPage run={run} />} />
           <Route path="/documents" element={<DocumentsPage />} />
+          <Route path="/workflow" element={<WorkflowPage run={run} reload={reload} />} />
         </Routes>
       </main>
     </div>

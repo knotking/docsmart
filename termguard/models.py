@@ -253,6 +253,16 @@ class Decision(SQLModel, table=True):
     note: Optional[str] = Field(default=None, sa_column=Column(Text))
     decided_at: datetime = Field(default_factory=utcnow, index=True)
 
+    # Who decided, and - when it was an agent - on whose authority. A decision with
+    # decided_by_kind == AGENT and no policy_clause_id is a bug, and verify.py says so.
+    participant_id: Optional[int] = Field(default=None, foreign_key="participant.id", index=True)
+    decided_by_kind: ActorKind = Field(default=ActorKind.HUMAN, index=True)
+    policy_clause_id: Optional[str] = Field(default=None, index=True)
+    policy_hash: Optional[str] = None
+    requires_human_confirm: bool = Field(default=False, index=True)
+    confirmed_by: Optional[str] = None
+    confirmed_at: Optional[datetime] = None
+
 
 # --------------------------------------------------------------------------- audit
 
@@ -284,3 +294,143 @@ class AuditEvent(SQLModel, table=True):
     summary: str = Field(default="", sa_column=Column(Text))
     payload: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     content_sha256: Optional[str] = Field(default=None, description="content this event concerns")
+
+
+# ------------------------------------------------------------------- workflow
+#
+# Several people - and several agents - work one run together. Three things have to be
+# true for that to be defensible in a regulated setting:
+#
+#   1. Every decision names a participant, and participants are typed: a human and an
+#      agent are not interchangeable, and the trail must never blur them.
+#   2. Two reviewers cannot silently decide the same change. Work is assigned, and held
+#      under a short lease while someone is actually on it.
+#   3. Separation of duties. Whoever authored content cannot be the one who approves it,
+#      and no agent signs anything off.
+
+
+class Role(str, Enum):
+    """What a participant is entitled to do. A participant may hold several."""
+
+    REVIEWER = "reviewer"    # decides individual changes
+    APPROVER = "approver"    # signs off a whole run; may not have decided in it
+    AUTHOR = "author"        # proposes content; explicitly cannot approve
+    OBSERVER = "observer"    # read-only
+
+
+class ParticipantKind(str, Enum):
+    HUMAN = "human"
+    AGENT = "agent"
+
+
+class ClaimStatus(str, Enum):
+    HELD = "held"
+    RELEASED = "released"
+    EXPIRED = "expired"
+
+
+class SignOffDecision(str, Enum):
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
+class Participant(SQLModel, table=True):
+    """A human or an agent that can act on a run.
+
+    Identity is asserted by the caller, not proven - authentication is deliberately out of
+    scope (CLAUDE.md) and IAM in front of the service is the real boundary. What this
+    table buys is *attribution*: every decision, claim and sign-off resolves to a row here
+    with a kind and a set of roles, so the audit trail can never report an agent decision
+    as if a person made it.
+    """
+
+    __tablename__ = "participant"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(index=True)
+    email: Optional[str] = Field(default=None, index=True)
+    kind: ParticipantKind = Field(default=ParticipantKind.HUMAN, index=True)
+    roles: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    active: bool = Field(default=True, index=True)
+    created_at: datetime = Field(default_factory=utcnow)
+
+    # Agents only: what is running, and under which authority.
+    model: Optional[str] = None
+    policy_hash: Optional[str] = None
+    note: Optional[str] = Field(default=None, sa_column=Column(Text))
+
+    __table_args__ = (UniqueConstraint("name", name="uq_participant_name"),)
+
+    def has_role(self, role: Role | str) -> bool:
+        return (role.value if isinstance(role, Role) else role) in self.roles
+
+    @property
+    def is_agent(self) -> bool:
+        return self.kind is ParticipantKind.AGENT
+
+
+class Assignment(SQLModel, table=True):
+    """Durable routing: whose queue a change sits in.
+
+    Append-only, like everything else that records intent. Reassigning inserts a row; the
+    newest row for a change is the live one, and the history shows a change being handed
+    between reviewers rather than quietly moving.
+    """
+
+    __tablename__ = "assignment"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    run_id: int = Field(foreign_key="run.id", index=True)
+    change_id: int = Field(foreign_key="change.id", index=True)
+    participant_id: int = Field(foreign_key="participant.id", index=True)
+    assigned_by: str = Field(default="system")
+    assigned_at: datetime = Field(default_factory=utcnow, index=True)
+    reason: Optional[str] = Field(default=None, description="why this reviewer, e.g. 'by rule'")
+
+
+class Claim(SQLModel, table=True):
+    """A short lease held while someone is actually working on a change.
+
+    Assignment says a change is yours; a claim says you are on it *now*. Without this,
+    two reviewers working the same queue both open change 412, both decide, and the second
+    decision silently supersedes the first - which the append-only log would faithfully
+    record and nobody would ever notice.
+
+    Leases expire so a reviewer who closes their laptop does not block the queue.
+    """
+
+    __tablename__ = "claim"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    change_id: int = Field(foreign_key="change.id", index=True)
+    participant_id: int = Field(foreign_key="participant.id", index=True)
+    status: ClaimStatus = Field(default=ClaimStatus.HELD, index=True)
+    claimed_at: datetime = Field(default_factory=utcnow, index=True)
+    expires_at: datetime = Field(index=True)
+    released_at: Optional[datetime] = None
+
+    __table_args__ = (Index("ix_claim_change_status", "change_id", "status"),)
+
+
+class SignOff(SQLModel, table=True):
+    """A participant approving or rejecting a whole run.
+
+    Records exactly what was signed: the rulebook and corpus hashes, the policy hash under
+    which any agent decisions were made, and the counts at the moment of signing. A
+    sign-off that cannot say what it covered is not a sign-off.
+    """
+
+    __tablename__ = "signoff"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    run_id: int = Field(foreign_key="run.id", index=True)
+    participant_id: int = Field(foreign_key="participant.id", index=True)
+    decision: SignOffDecision = Field(index=True)
+    role: Role = Field(default=Role.APPROVER)
+    signed_at: datetime = Field(default_factory=utcnow, index=True)
+    note: Optional[str] = Field(default=None, sa_column=Column(Text))
+
+    rulebook_hash: str = ""
+    corpus_hash: str = ""
+    policy_hash: str = ""
+    covered: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))

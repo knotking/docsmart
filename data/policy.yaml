@@ -1,0 +1,63 @@
+# Agent authority policy - what an AI participant may decide without a human.
+#
+# Read alongside data/rulebook.yaml. The rulebook says what is wrong; this says who is
+# allowed to say it has been dealt with. Anything no clause below covers goes to a human:
+# the default is not configurable.
+#
+# Every agent decision records the clause id and this file's hash, so "on what authority
+# did a machine approve this?" has a specific, checkable answer.
+version: "1"
+approved_by: "quality-assurance"
+
+# Unlisted rules are HIGH, so adding a rule to the rulebook never silently widens what an
+# agent may decide. Raising a rule's risk band is a deliberate, reviewable act.
+default_risk: high
+
+risk_by_rule:
+  R-001: medium   # product rename - stable meaning, but it is the trade name
+  R-002: high     # side effect / adverse event - meaning depends on audience
+  R-003: high     # IFU expansion - depends on first use within the document
+  R-004: medium   # physician / healthcare provider
+  R-005: medium   # shall / must
+  R-006: low      # labelling / labeling - US spelling, no semantic content
+  R-007: low      # ml / mL - unit style
+  R-008: low      # single use / single-use - hyphenation
+  R-009: medium   # infusion set / administration set
+  R-010: high     # nurse / clinician - depends on whether a credential is meant
+  R-011: medium   # error message / alarm condition
+  R-012: medium   # drug library / medication library
+
+agent_may_decide:
+  - id: P-001
+    rules: [R-006, R-007, R-008]
+    classifications: [unambiguous]
+    mechanisms: [deterministic]
+    max_risk: low
+    decision: accepted
+    requires_human_confirm: false
+    owner: quality-assurance
+    rationale: >-
+      Orthographic rules with no semantic content: US spelling, the litre symbol, and a
+      compound-modifier hyphen. A wrong decision here produces a typo, not a regulatory
+      misstatement, and the change is a plain token substitution the scanner already
+      classified as unambiguous. These are reversible in one click and caught by the
+      verification re-scan.
+
+  - id: P-002
+    rules: []
+    classifications: [unambiguous]
+    mechanisms: [deterministic]
+    parts: [header, footer]
+    max_risk: medium
+    decision: accepted
+    requires_human_confirm: true
+    owner: quality-assurance
+    rationale: >-
+      Running headers and footers repeat the same string on every page, so the same
+      decision is made dozens of times identically. An agent may clear these to keep the
+      human queue focused on body text, but requires_human_confirm is set: a person still
+      confirms the batch before the run can be signed off.
+
+  # Deliberately absent: R-002, R-003 and R-010. Those are context_required in the
+  # rulebook - the model is allowed to *propose* on them, never to dispose of them.
+  # Adding them here would undo the whole containment argument.

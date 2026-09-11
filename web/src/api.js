@@ -49,6 +49,30 @@ export const api = {
   rulebook: () => request("/rulebook"),
   saveRulebook: (body) => request("/rulebook", { method: "PUT", body: JSON.stringify(body) }),
 
+  // --- metrics -------------------------------------------------------------
+  metrics: (runId) => request(`/metrics${runId ? `?run_id=${runId}` : ""}`),
+  metricsRules: (runId) => request(`/metrics/rules${runId ? `?run_id=${runId}` : ""}`),
+
+  // --- workflow ------------------------------------------------------------
+  policy: () => request("/policy"),
+  participants: () => request("/participants"),
+  createParticipant: (body) =>
+    request("/participants", { method: "POST", body: JSON.stringify(body) }),
+  assign: (runId, body) =>
+    request(`/runs/${runId}/assign`, { method: "POST", body: JSON.stringify(body) }),
+  claim: (changeId, body) =>
+    request(`/changes/${changeId}/claim`, { method: "POST", body: JSON.stringify(body) }),
+  releaseClaim: (changeId, participant) =>
+    request(`/changes/${changeId}/claim?participant=${encodeURIComponent(participant)}`,
+            { method: "DELETE" }),
+  agentDispose: (runId, body) =>
+    request(`/runs/${runId}/agent-dispose`, { method: "POST", body: JSON.stringify(body) }),
+  confirmAgentBatch: (runId, body) =>
+    request(`/runs/${runId}/confirm-agent-batch`, { method: "POST", body: JSON.stringify(body) }),
+  signoffReadiness: (runId) => request(`/runs/${runId}/signoff`),
+  signOff: (runId, body) =>
+    request(`/runs/${runId}/signoff`, { method: "POST", body: JSON.stringify(body) }),
+
   // Plain URLs, for links and downloads.
   urls: {
     redlined: (runId, name) => `${BASE}/runs/${runId}/files/${encodeURIComponent(name)}/redlined`,
